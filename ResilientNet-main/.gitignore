@@ -1,0 +1,21 @@
+# Compiled class files
+*.class
+
+# Package Files
+*.jar
+*.war
+*.ear
+
+# Maven target folder (if you use Maven later)
+target/
+
+# ResilientNet Specific Files
+node_id_*.txt
+
+# IDE specific files (IntelliJ, VS Code, Eclipse)
+.idea/
+*.iml
+.vscode/
+.classpath
+.project
+.settings/
