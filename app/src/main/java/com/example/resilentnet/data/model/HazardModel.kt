@@ -300,4 +300,53 @@ object GeoCodec {
      * Check if a message content string is a hazard wire message.
      */
     fun isHazardMessage(content: String): Boolean = content.startsWith(HAZARD_PREFIX)
+
+    // ── Peer Location Beacon Wire Format (@LOC|) ─────────────────
+    private const val LOC_PREFIX = "@LOC|"
+
+    fun serializeLocation(lat: Double, lon: Double, headingDeg: Int, role: String): String {
+        val geohash = encodeGeohash(lat, lon, 9)
+        val h = headingDeg.coerceIn(0, 359)
+        return "$LOC_PREFIX$geohash|$h|$role"
+    }
+
+    fun parseLocation(message: Message): PeerMapState? {
+        val content = message.content
+        if (!content.startsWith(LOC_PREFIX)) return null
+        return try {
+            val body = content.removePrefix(LOC_PREFIX)
+            val parts = body.split("|")
+            if (parts.size < 3) return null
+            val geohash = parts[0]
+            val heading = parts[1].toFloatOrNull() ?: 0f
+            val role = parts[2]
+            val (lat, lon) = decodeGeohash(geohash)
+            PeerMapState(
+                peerId = message.senderId,
+                displayName = "Node ${message.senderId}",
+                role = role,
+                latitude = lat,
+                longitude = lon,
+                heading = heading,
+                lastUpdated = message.timestamp
+            )
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    fun isLocationMessage(content: String): Boolean = content.startsWith(LOC_PREFIX)
 }
+
+/**
+ * Real-time map representation of an active mesh peer.
+ */
+data class PeerMapState(
+    val peerId: String,
+    val displayName: String,
+    val role: String, // "ADMIN" or "USER"
+    val latitude: Double,
+    val longitude: Double,
+    val heading: Float = 0f,
+    val lastUpdated: Long = System.currentTimeMillis()
+)

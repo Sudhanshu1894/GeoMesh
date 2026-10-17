@@ -8,6 +8,7 @@ import com.example.resilentnet.data.model.HazardMarker
 import com.example.resilentnet.data.model.HazardType
 import com.example.resilentnet.data.model.Message
 import com.example.resilentnet.data.model.MessagePriority
+import com.example.resilentnet.data.model.PeerMapState
 import com.example.resilentnet.data.model.PeerNode
 import com.example.resilentnet.data.network.NetworkDiagnostics
 import com.example.resilentnet.domain.MeshRepository
@@ -50,8 +51,14 @@ class MeshViewModel(
     val chatMessages: StateFlow<List<Message>> = repository.chatMessages
     val hazards: StateFlow<List<HazardMarker>> = repository.hazards
     val peers: StateFlow<List<PeerNode>> = repository.peers
+    val peerLocations: StateFlow<Map<String, PeerMapState>> = repository.peerLocations
     val diagnostics: StateFlow<NetworkDiagnostics> = repository.diagnostics
     val systemAlerts: SharedFlow<String> = repository.systemAlerts
+
+    // Location beacon throttling
+    private var lastBroadcastLat = 0.0
+    private var lastBroadcastLon = 0.0
+    private var lastBroadcastTime = 0L
 
     // Current GPS location state with accuracy, provider, and fix status
     private val _locationState = MutableStateFlow(
@@ -130,6 +137,35 @@ class MeshViewModel(
             timestamp = System.currentTimeMillis()
         )
         _currentLocation.value = Pair(lat, lon)
+
+        // Broadcast location beacon if moved > 3m or > 12s has elapsed while networking is running
+        val now = System.currentTimeMillis()
+        val distMoved = kotlin.math.sqrt(
+            (lat - lastBroadcastLat).let { it * it } + (lon - lastBroadcastLon).let { it * it }
+        ) * 111320.0
+
+        if (isNetworkingActive && (distMoved > 3.0 || now - lastBroadcastTime > 12_000L)) {
+            lastBroadcastLat = lat
+            lastBroadcastLon = lon
+            lastBroadcastTime = now
+            viewModelScope.launch {
+                try {
+                    repository.broadcastLocation(lat, lon, 0f)
+                } catch (_: Exception) {}
+            }
+        }
+    }
+
+    fun broadcastCurrentLocation(heading: Float = 0f) {
+        val loc = _currentLocation.value ?: return
+        lastBroadcastLat = loc.first
+        lastBroadcastLon = loc.second
+        lastBroadcastTime = System.currentTimeMillis()
+        viewModelScope.launch {
+            try {
+                repository.broadcastLocation(loc.first, loc.second, heading)
+            } catch (_: Exception) {}
+        }
     }
 
     fun setAnchorCoordinates(lat: Double, lon: Double, sourceName: String = "manual") {
@@ -142,6 +178,46 @@ class MeshViewModel(
             timestamp = System.currentTimeMillis()
         )
         _currentLocation.value = Pair(lat, lon)
+    }
+
+    /**
+     * Get list of all peers with map coordinates (combining @LOC beacons, hazard reports, and fallback offsets)
+     */
+    fun getConsolidatedPeers(): List<PeerMapState> {
+        val locs = peerLocations.value.toMutableMap()
+        val currentPeers = peers.value
+        val currentHazards = hazards.value
+
+        for (peer in currentPeers) {
+            if (!locs.containsKey(peer.id)) {
+                // Check if peer sent any hazard
+                val hazardFromPeer = currentHazards.firstOrNull { it.senderId == peer.id }
+                if (hazardFromPeer != null) {
+                    locs[peer.id] = PeerMapState(
+                        peerId = peer.id,
+                        displayName = peer.displayName,
+                        role = "USER",
+                        latitude = hazardFromPeer.latitude,
+                        longitude = hazardFromPeer.longitude,
+                        heading = 0f,
+                        lastUpdated = hazardFromPeer.timestamp
+                    )
+                } else {
+                    // Place near anchor offset
+                    val hashOffset = (peer.id.hashCode() % 100) * 0.0001
+                    locs[peer.id] = PeerMapState(
+                        peerId = peer.id,
+                        displayName = peer.displayName,
+                        role = "USER",
+                        latitude = (_currentLocation.value?.first ?: 12.8406) + hashOffset,
+                        longitude = (_currentLocation.value?.second ?: 80.1534) - hashOffset,
+                        heading = 0f,
+                        lastUpdated = System.currentTimeMillis()
+                    )
+                }
+            }
+        }
+        return locs.values.toList()
     }
 
     fun reportHazard(

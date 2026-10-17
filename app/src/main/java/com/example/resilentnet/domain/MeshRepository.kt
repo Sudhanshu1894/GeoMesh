@@ -6,6 +6,7 @@ import com.example.resilentnet.data.model.HazardMarker
 import com.example.resilentnet.data.model.HazardType
 import com.example.resilentnet.data.model.Message
 import com.example.resilentnet.data.model.MessagePriority
+import com.example.resilentnet.data.model.PeerMapState
 import com.example.resilentnet.data.model.PeerNode
 import com.example.resilentnet.data.network.MeshSocketManager
 import com.example.resilentnet.data.network.NetworkDiagnostics
@@ -46,6 +47,10 @@ class MeshRepository(context: Context) {
     // Parsed hazard markers derived from @HAZARD| messages
     private val _hazards = MutableStateFlow<List<HazardMarker>>(emptyList())
     val hazards: StateFlow<List<HazardMarker>> = _hazards.asStateFlow()
+
+    // Real-time locations of mesh peers derived from @LOC| beacons
+    private val _peerLocations = MutableStateFlow<Map<String, PeerMapState>>(emptyMap())
+    val peerLocations: StateFlow<Map<String, PeerMapState>> = _peerLocations.asStateFlow()
 
     private val _peers = MutableStateFlow<List<PeerNode>>(emptyList())
     val peers: StateFlow<List<PeerNode>> = _peers.asStateFlow()
@@ -94,8 +99,23 @@ class MeshRepository(context: Context) {
     private fun refreshMessages() {
         val allMessages = messageStore.getAllMessages()
         _messages.value = allMessages
-        _chatMessages.value = allMessages.filter { !GeoCodec.isHazardMessage(it.content) }
+        _chatMessages.value = allMessages.filter {
+            !GeoCodec.isHazardMessage(it.content) && !GeoCodec.isLocationMessage(it.content)
+        }
         _hazards.value = allMessages.mapNotNull { GeoCodec.parseHazard(it) }
+
+        // Extract latest location beacons per peer
+        val latestLocs = mutableMapOf<String, PeerMapState>()
+        allMessages.filter { GeoCodec.isLocationMessage(it.content) }
+            .sortedBy { it.timestamp }
+            .forEach { msg ->
+                GeoCodec.parseLocation(msg)?.let { loc ->
+                    val existingPeer = socketManager.knownPeers[msg.senderId]
+                    val name = existingPeer?.displayName ?: "Node ${msg.senderId}"
+                    latestLocs[msg.senderId] = loc.copy(displayName = name)
+                }
+            }
+        _peerLocations.value = latestLocs
     }
 
     private fun refreshPeers() {
@@ -154,6 +174,19 @@ class MeshRepository(context: Context) {
             content = content,
             targetPeerId = null, // Broadcast to entire mesh
             priority = MessagePriority.HIGH
+        )
+    }
+
+    /**
+     * Broadcast live GPS location beacon to mesh peers via @LOC| wire format.
+     */
+    suspend fun broadcastLocation(lat: Double, lon: Double, heading: Float = 0f): Message {
+        val role = if (identityStore.isAdmin) "ADMIN" else "USER"
+        val content = GeoCodec.serializeLocation(lat, lon, heading.toInt(), role)
+        return sendMessage(
+            content = content,
+            targetPeerId = null, // Broadcast to entire mesh
+            priority = MessagePriority.LOW
         )
     }
 
