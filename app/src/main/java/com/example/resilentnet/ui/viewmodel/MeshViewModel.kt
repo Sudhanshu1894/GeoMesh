@@ -19,6 +19,18 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
 /**
+ * Device location snapshot with accuracy, provider source, and fix verification.
+ */
+data class DeviceLocation(
+    val latitude: Double,
+    val longitude: Double,
+    val accuracyMeters: Float? = null,
+    val isRealFix: Boolean = false,
+    val provider: String = "default",
+    val timestamp: Long = System.currentTimeMillis()
+)
+
+/**
  * ViewModel managing UI state and user interactions for ResilientNet.
  */
 class MeshViewModel(
@@ -41,7 +53,12 @@ class MeshViewModel(
     val diagnostics: StateFlow<NetworkDiagnostics> = repository.diagnostics
     val systemAlerts: SharedFlow<String> = repository.systemAlerts
 
-    // Current GPS location (fallback test coordinate for indoor testing)
+    // Current GPS location state with accuracy, provider, and fix status
+    private val _locationState = MutableStateFlow(
+        DeviceLocation(latitude = 12.8406, longitude = 80.1534, isRealFix = false, provider = "default")
+    )
+    val locationState: StateFlow<DeviceLocation> = _locationState.asStateFlow()
+
     private val _currentLocation = MutableStateFlow<Pair<Double, Double>?>(Pair(12.8406, 80.1534))
     val currentLocation: StateFlow<Pair<Double, Double>?> = _currentLocation.asStateFlow()
 
@@ -98,7 +115,32 @@ class MeshViewModel(
         repository.clearChatHistory()
     }
 
-    fun updateLocation(lat: Double, lon: Double) {
+    fun updateLocation(
+        lat: Double,
+        lon: Double,
+        accuracy: Float? = null,
+        provider: String = "gps"
+    ) {
+        _locationState.value = DeviceLocation(
+            latitude = lat,
+            longitude = lon,
+            accuracyMeters = accuracy,
+            isRealFix = true,
+            provider = provider,
+            timestamp = System.currentTimeMillis()
+        )
+        _currentLocation.value = Pair(lat, lon)
+    }
+
+    fun setAnchorCoordinates(lat: Double, lon: Double, sourceName: String = "manual") {
+        _locationState.value = DeviceLocation(
+            latitude = lat,
+            longitude = lon,
+            accuracyMeters = null,
+            isRealFix = true,
+            provider = sourceName,
+            timestamp = System.currentTimeMillis()
+        )
         _currentLocation.value = Pair(lat, lon)
     }
 

@@ -4,9 +4,9 @@ import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
 import android.location.Location
-import android.location.LocationListener
-import android.location.LocationManager
 import android.os.Bundle
+import android.widget.Toast
+import com.example.resilentnet.data.location.LocationProviderHelper
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
@@ -100,46 +100,62 @@ fun HazardMapScreen(
     val context = LocalContext.current
     val hazards by viewModel.hazards.collectAsState()
     val currentLocation by viewModel.currentLocation.collectAsState()
+    val locationState by viewModel.locationState.collectAsState()
 
     var radarRadiusMeters by remember { mutableDoubleStateOf(500.0) }
-    var isSimulationMode by remember { mutableStateOf(true) }
+    var isSimulationMode by remember { mutableStateOf(false) }
     var isRouteMode by remember { mutableStateOf(false) }
     var selectedHazardType by remember { mutableStateOf(HazardType.DEMOLISHED_BUILDING) }
     var showTypeMenu by remember { mutableStateOf(false) }
     var showReportDialog by remember { mutableStateOf(false) }
+    var showLocationDialog by remember { mutableStateOf(false) }
+    var manualLatText by remember { mutableStateOf("") }
+    var manualLonText by remember { mutableStateOf("") }
     var reportDescription by remember { mutableStateOf("") }
     val tracedRoutePoints = remember { mutableStateListOf<Pair<Double, Double>>() }
 
-    // GPS Location Listener
+    fun refreshGps() {
+        val best = LocationProviderHelper.getBestLastKnownLocation(context)
+        if (best != null) {
+            viewModel.updateLocation(
+                best.latitude,
+                best.longitude,
+                if (best.hasAccuracy()) best.accuracy else null,
+                best.provider ?: "gps"
+            )
+            val accStr = if (best.hasAccuracy()) " (±${best.accuracy.toInt()}m)" else ""
+            Toast.makeText(
+                context,
+                "GPS: ${"%.4f".format(best.latitude)}, ${"%.4f".format(best.longitude)}$accStr",
+                Toast.LENGTH_SHORT
+            ).show()
+        } else {
+            Toast.makeText(context, "Scanning for GPS / Network fix...", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    // Continuous location listener across all available providers with 0m threshold
     DisposableEffect(Unit) {
-        val locationManager = context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager
-        val listener = object : LocationListener {
-            override fun onLocationChanged(location: Location) {
-                viewModel.updateLocation(location.latitude, location.longitude)
-            }
-            @Deprecated("Deprecated in API") override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
-            override fun onProviderEnabled(provider: String) {}
-            override fun onProviderDisabled(provider: String) {}
+        LocationProviderHelper.getBestLastKnownLocation(context)?.let { loc ->
+            viewModel.updateLocation(
+                loc.latitude,
+                loc.longitude,
+                if (loc.hasAccuracy()) loc.accuracy else null,
+                loc.provider ?: "cache"
+            )
         }
 
-        val hasFine = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
-        val hasCoarse = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
-
-        if (hasFine || hasCoarse) {
-            try {
-                val provider = if (hasFine) LocationManager.GPS_PROVIDER else LocationManager.NETWORK_PROVIDER
-                if (locationManager?.isProviderEnabled(provider) == true) {
-                    locationManager.requestLocationUpdates(provider, 3000L, 5f, listener)
-                }
-                // Also try network provider as fallback
-                if (hasFine && locationManager?.isProviderEnabled(LocationManager.NETWORK_PROVIDER) == true) {
-                    locationManager.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 5000L, 10f, listener)
-                }
-            } catch (_: SecurityException) {}
+        val pair = LocationProviderHelper.registerLocationUpdates(context, 1000L) { loc ->
+            viewModel.updateLocation(
+                loc.latitude,
+                loc.longitude,
+                if (loc.hasAccuracy()) loc.accuracy else null,
+                loc.provider ?: "gps"
+            )
         }
 
         onDispose {
-            try { locationManager?.removeUpdates(listener) } catch (_: Exception) {}
+            LocationProviderHelper.unregisterLocationUpdates(pair)
         }
     }
 
@@ -159,39 +175,93 @@ fun HazardMapScreen(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Column {
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .clickable {
+                        manualLatText = "%.6f".format(centerLat)
+                        manualLonText = "%.6f".format(centerLon)
+                        showLocationDialog = true
+                    }
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text(
+                        text = "⚠ Hazard Radar",
+                        fontSize = 17.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = ResilientTextMain
+                    )
+                    // Status Badge
+                    val acc = locationState.accuracyMeters
+                    val badgeColor = when {
+                        locationState.isRealFix && acc != null -> ResilientPrimaryGreen
+                        locationState.provider.startsWith("peer") || locationState.provider.startsWith("hazard") || locationState.provider == "manual" -> ResilientInfoBlue
+                        else -> ResilientWarningAmber
+                    }
+                    val badgeText = when {
+                        locationState.isRealFix && acc != null -> "GPS ±${acc.toInt()}m"
+                        locationState.provider.startsWith("peer") || locationState.provider.startsWith("hazard") -> "Anchored"
+                        locationState.provider == "manual" -> "Custom"
+                        else -> "No Fix"
+                    }
+                    Box(
+                        modifier = Modifier
+                            .background(badgeColor.copy(alpha = 0.15f), RoundedCornerShape(4.dp))
+                            .padding(horizontal = 5.dp, vertical = 2.dp)
+                    ) {
+                        Text(
+                            text = badgeText,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = badgeColor
+                        )
+                    }
+                }
                 Text(
-                    text = "⚠ Hazard Radar",
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = ResilientTextMain
-                )
-                Text(
-                    text = if (isSimulationMode) "📍 Test Mode — Tap radar to place"
-                    else "📍 GPS: ${"%.4f".format(centerLat)}, ${"%.4f".format(centerLon)}",
+                    text = "📍 ${"%.4f".format(centerLat)}, ${"%.4f".format(centerLon)} (Tap to align/sync)",
                     fontSize = 11.sp,
                     color = ResilientTextSecondary
                 )
             }
 
-            // Simulation toggle
-            OutlinedButton(
-                onClick = { isSimulationMode = !isSimulationMode },
-                colors = ButtonDefaults.outlinedButtonColors(
-                    contentColor = if (isSimulationMode) ResilientWarningAmber else ResilientPrimaryGreen
-                ),
-                border = androidx.compose.foundation.BorderStroke(
-                    1.dp,
-                    if (isSimulationMode) ResilientWarningAmber else ResilientCardBorder
-                ),
-                shape = RoundedCornerShape(6.dp),
-                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
-            ) {
-                Text(
-                    text = if (isSimulationMode) "🧪 Test" else "📡 GPS",
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.SemiBold
-                )
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                // Refresh GPS button
+                OutlinedButton(
+                    onClick = { refreshGps() },
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = ResilientPrimaryGreen),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, ResilientCardBorder),
+                    shape = RoundedCornerShape(6.dp),
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                ) {
+                    Text(
+                        text = "🔄 GPS",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+
+                // Simulation mode toggle
+                OutlinedButton(
+                    onClick = { isSimulationMode = !isSimulationMode },
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        contentColor = if (isSimulationMode) ResilientWarningAmber else ResilientTextSecondary
+                    ),
+                    border = androidx.compose.foundation.BorderStroke(
+                        1.dp,
+                        if (isSimulationMode) ResilientWarningAmber else ResilientCardBorder
+                    ),
+                    shape = RoundedCornerShape(6.dp),
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                ) {
+                    Text(
+                        text = if (isSimulationMode) "🧪 Test: ON" else "🧪 Test: OFF",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
             }
         }
 
@@ -402,7 +472,21 @@ fun HazardMapScreen(
             items(hazards.sortedByDescending { it.timestamp }) { hazard ->
                 HazardFeedCard(
                     hazard = hazard,
-                    distanceMeters = hazard.distanceTo(centerLat, centerLon)
+                    distanceMeters = hazard.distanceTo(centerLat, centerLon),
+                    onAlignRadar = if (hazard.senderId != viewModel.myNodeId) {
+                        {
+                            viewModel.setAnchorCoordinates(
+                                hazard.latitude,
+                                hazard.longitude,
+                                "Node ${hazard.senderId}"
+                            )
+                            Toast.makeText(
+                                context,
+                                "Radar centered on Node ${hazard.senderId} coordinates!",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        }
+                    } else null
                 )
             }
 
@@ -504,6 +588,140 @@ fun HazardMapScreen(
                     reportDescription = ""
                 }) {
                     Text("Cancel", color = ResilientTextSecondary)
+                }
+            },
+            containerColor = ResilientCardBg,
+            shape = RoundedCornerShape(12.dp)
+        )
+    }
+
+    // ── Location & Anchor Dialog ─────────────────
+    if (showLocationDialog) {
+        AlertDialog(
+            onDismissRequest = { showLocationDialog = false },
+            title = {
+                Text(
+                    text = "📍 Radar Location & Anchor",
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = ResilientTextMain
+                )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    val dialogAcc = locationState.accuracyMeters
+                    val accText = if (dialogAcc != null) " (±${dialogAcc.toInt()}m)" else ""
+                    Text(
+                        text = "Center: ${"%.6f".format(centerLat)}, ${"%.6f".format(centerLon)}\n" +
+                                "Source: ${locationState.provider}$accText",
+                        fontSize = 12.sp,
+                        color = ResilientTextSecondary
+                    )
+
+                    // Refresh GPS Button
+                    Button(
+                        onClick = {
+                            refreshGps()
+                            showLocationDialog = false
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(containerColor = ResilientPrimaryGreen),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Text("🔄 Request Fresh GPS Fix Now", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                    }
+
+                    // Align with peer if hazards exist
+                    val latestPeerHazard = hazards.firstOrNull { it.senderId != viewModel.myNodeId }
+                    if (latestPeerHazard != null) {
+                        OutlinedButton(
+                            onClick = {
+                                viewModel.setAnchorCoordinates(
+                                    latestPeerHazard.latitude,
+                                    latestPeerHazard.longitude,
+                                    "Node ${latestPeerHazard.senderId}"
+                                )
+                                Toast.makeText(
+                                    context,
+                                    "Radar anchored to Node ${latestPeerHazard.senderId} coordinates!",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                                showLocationDialog = false
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = ResilientInfoBlue),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, ResilientInfoBlue),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Text(
+                                text = "🎯 Align with Peer (${latestPeerHazard.senderId})",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
+
+                    // Manual coordinates for indoor testing
+                    Text(
+                        text = "Or enter anchor coordinates manually:",
+                        fontSize = 11.sp,
+                        color = ResilientTextSecondary
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            value = manualLatText,
+                            onValueChange = { manualLatText = it },
+                            label = { Text("Latitude", fontSize = 11.sp) },
+                            modifier = Modifier.weight(1f),
+                            singleLine = true,
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = ResilientPrimaryGreen,
+                                unfocusedBorderColor = ResilientCardBorder
+                            )
+                        )
+                        OutlinedTextField(
+                            value = manualLonText,
+                            onValueChange = { manualLonText = it },
+                            label = { Text("Longitude", fontSize = 11.sp) },
+                            modifier = Modifier.weight(1f),
+                            singleLine = true,
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = ResilientPrimaryGreen,
+                                unfocusedBorderColor = ResilientCardBorder
+                            )
+                        )
+                    }
+
+                    Button(
+                        onClick = {
+                            val lat = manualLatText.toDoubleOrNull()
+                            val lon = manualLonText.toDoubleOrNull()
+                            if (lat != null && lon != null) {
+                                viewModel.setAnchorCoordinates(lat, lon, "manual")
+                                Toast.makeText(context, "Anchor coordinates updated!", Toast.LENGTH_SHORT).show()
+                                showLocationDialog = false
+                            } else {
+                                Toast.makeText(context, "Invalid coordinates format", Toast.LENGTH_SHORT).show()
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(containerColor = ResilientInputBg),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, ResilientCardBorder),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Text(
+                            text = "Set Custom Radar Center",
+                            color = ResilientTextMain,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { showLocationDialog = false }) {
+                    Text("Close", color = ResilientTextSecondary)
                 }
             },
             containerColor = ResilientCardBg,
@@ -656,7 +874,8 @@ private fun hazardTypeEmoji(type: HazardType): String = when (type) {
 @Composable
 private fun HazardFeedCard(
     hazard: HazardMarker,
-    distanceMeters: Double
+    distanceMeters: Double,
+    onAlignRadar: (() -> Unit)? = null
 ) {
     val dateFormat = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
 
@@ -703,7 +922,10 @@ private fun HazardFeedCard(
                     color = ResilientTextSecondary,
                     maxLines = 1
                 )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
                     Text(
                         text = "From: ${hazard.senderId}",
                         fontSize = 10.sp,
@@ -718,8 +940,11 @@ private fun HazardFeedCard(
                 }
             }
 
-            // Distance badge
-            Column(horizontalAlignment = Alignment.End) {
+            // Distance badge & Align button
+            Column(
+                horizontalAlignment = Alignment.End,
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
                 val distText = if (distanceMeters < 1000) {
                     "${distanceMeters.toInt()}m"
                 } else {
@@ -731,11 +956,28 @@ private fun HazardFeedCard(
                     fontWeight = FontWeight.Bold,
                     color = if (distanceMeters < 200) ResilientErrorRed else ResilientTextMain
                 )
-                Text(
-                    text = if (hazard.isRoute) "Route" else "Point",
-                    fontSize = 10.sp,
-                    color = ResilientTextSecondary
-                )
+                if (onAlignRadar != null) {
+                    OutlinedButton(
+                        onClick = onAlignRadar,
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = ResilientInfoBlue),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, ResilientInfoBlue.copy(alpha = 0.5f)),
+                        shape = RoundedCornerShape(4.dp),
+                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
+                        modifier = Modifier.height(24.dp)
+                    ) {
+                        Text(
+                            text = "🎯 Align",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                } else {
+                    Text(
+                        text = if (hazard.isRoute) "Route" else "Point",
+                        fontSize = 10.sp,
+                        color = ResilientTextSecondary
+                    )
+                }
             }
         }
     }

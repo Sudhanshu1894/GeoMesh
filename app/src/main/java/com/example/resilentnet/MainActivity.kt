@@ -62,17 +62,39 @@ class MainActivity : ComponentActivity() {
         if (!notificationsGranted) {
             Toast.makeText(this, "Notification permission is recommended for background networking.", Toast.LENGTH_SHORT).show()
         }
+        val fineGranted = permissions[Manifest.permission.ACCESS_FINE_LOCATION] ?: false
+        val coarseGranted = permissions[Manifest.permission.ACCESS_COARSE_LOCATION] ?: false
+        if (fineGranted || coarseGranted) {
+            initLocation()
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         requestAppPermissions()
+        initLocation()
 
         setContent {
             ResilentNetTheme {
                 MainAppScaffold(viewModel = viewModel)
             }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        initLocation()
+    }
+
+    private fun initLocation() {
+        com.example.resilentnet.data.location.LocationProviderHelper.getBestLastKnownLocation(this)?.let { loc ->
+            viewModel.updateLocation(
+                lat = loc.latitude,
+                lon = loc.longitude,
+                accuracy = if (loc.hasAccuracy()) loc.accuracy else null,
+                provider = loc.provider ?: "cache"
+            )
         }
     }
 
