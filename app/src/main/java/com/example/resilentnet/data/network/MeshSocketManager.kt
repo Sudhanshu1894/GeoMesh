@@ -45,8 +45,12 @@ class MeshSocketManager(
     private val identityStore: NodeIdentityStore,
     private val messageStore: MessageStore
 ) {
+    companion object {
+        const val PORT = 9876
+    }
+
     private val tag = "MeshSocketManager"
-    val port = 9876
+    val port: Int = PORT
     private val gson = Gson()
 
     private val multicastLockHelper = MulticastLockHelper(context)
@@ -88,7 +92,7 @@ class MeshSocketManager(
     @Synchronized
     fun start(): Boolean {
         if (socket != null && !socket!!.isClosed) {
-            Log.d(tag, "Socket already running on port $port")
+            Log.d(tag, "Socket already running on port $PORT")
             return true
         }
 
@@ -97,17 +101,18 @@ class MeshSocketManager(
             multicastLockHelper.acquire()
             refreshLocalIps()
 
+            val bindPort = PORT
             socket = DatagramSocket(null).apply {
                 reuseAddress = true
                 broadcast = true
-                bind(InetSocketAddress(port))
+                bind(InetSocketAddress(bindPort))
             }
 
             _diagnostics.update {
                 it.copy(
                     engineState = "RUNNING",
                     localIpAddress = getPrimaryLocalIp(),
-                    listeningPort = port,
+                    listeningPort = PORT,
                     isMulticastLockHeld = multicastLockHelper.isHeld,
                     isSignalEnabled = isSignalEnabled
                 )
@@ -118,11 +123,11 @@ class MeshSocketManager(
             startTimeoutChecker()
             startRetryWorker()
 
-            onSystemNotification?.invoke("ResilientNet online on port $port")
-            Log.i(tag, "ResilientNet node online. ID=${identityStore.nodeId}, Port=$port")
+            onSystemNotification?.invoke("ResilientNet online on port $PORT")
+            Log.i(tag, "ResilientNet node online. ID=${identityStore.nodeId}, Port=$PORT")
             return true
         } catch (e: Exception) {
-            Log.e(tag, "Failed to start socket on port $port: ${e.message}", e)
+            Log.e(tag, "Failed to start socket on port $PORT: ${e.message}", e)
             _diagnostics.update {
                 it.copy(
                     engineState = "ERROR",
@@ -597,20 +602,43 @@ class MeshSocketManager(
 
         // 1. General limited broadcast
         try {
-            val dgram = DatagramPacket(bytes, bytes.size, InetAddress.getByName("255.255.255.255"), port)
+            val dgram = DatagramPacket(bytes, bytes.size, InetAddress.getByName("255.255.255.255"), PORT)
             sock.send(dgram)
         } catch (_: Exception) {}
 
-        // 2. Directed subnet broadcast on each active IPv4 interface
+        // 2. Directed subnet broadcast on each active IPv4 interface (including Wi-Fi hotspot AP)
         try {
             val interfaces = NetworkInterface.getNetworkInterfaces() ?: return@withContext
             for (iface in interfaces) {
-                if (!iface.isUp || iface.isLoopback || !iface.supportsMulticast()) continue
+                if (!iface.isUp || iface.isLoopback) continue
                 for (ia in iface.interfaceAddresses) {
-                    val bcast = ia.broadcast ?: continue
+                    val bcast = ia.broadcast ?: run {
+                        // Compute fallback broadcast address for hotspot or interfaces without explicit broadcast
+                        val addr = ia.address
+                        if (addr is Inet4Address && ia.networkPrefixLength in 8..30) {
+                            try {
+                                val ipBytes = addr.address
+                                val prefix = ia.networkPrefixLength.toInt()
+                                val ipInt = ((ipBytes[0].toInt() and 0xFF) shl 24) or
+                                        ((ipBytes[1].toInt() and 0xFF) shl 16) or
+                                        ((ipBytes[2].toInt() and 0xFF) shl 8) or
+                                        (ipBytes[3].toInt() and 0xFF)
+                                val mask = (-1) shl (32 - prefix)
+                                val bcastInt = ipInt or (mask.inv())
+                                val bcastBytes = byteArrayOf(
+                                    ((bcastInt ushr 24) and 0xFF).toByte(),
+                                    ((bcastInt ushr 16) and 0xFF).toByte(),
+                                    ((bcastInt ushr 8) and 0xFF).toByte(),
+                                    (bcastInt and 0xFF).toByte()
+                                )
+                                InetAddress.getByAddress(bcastBytes)
+                            } catch (_: Exception) { null }
+                        } else null
+                    } ?: continue
+
                     if (bcast.hostAddress == "255.255.255.255") continue
                     try {
-                        val dgram = DatagramPacket(bytes, bytes.size, bcast, port)
+                        val dgram = DatagramPacket(bytes, bytes.size, bcast, PORT)
                         sock.send(dgram)
                     } catch (_: Exception) {}
                 }
@@ -676,13 +704,22 @@ class MeshSocketManager(
 
     private fun isSelfPacket(packet: DatagramPacket): Boolean {
         val addr = packet.address?.hostAddress ?: return false
-        return localIpAddresses.contains(addr) && packet.port == port
+        return localIpAddresses.contains(addr) && packet.port == PORT
     }
 
     fun getPrimaryLocalIp(): String {
         try {
-            val ifaces = NetworkInterface.getNetworkInterfaces() ?: return "127.0.0.1"
-            for (iface in ifaces) {
+            val ifaces = NetworkInterface.getNetworkInterfaces()?.toList() ?: return "127.0.0.1"
+            // Prioritize Wi-Fi and Hotspot AP interfaces over mobile cellular data
+            val sorted = ifaces.sortedByDescending { iface ->
+                val name = iface.name.lowercase()
+                when {
+                    name.startsWith("wlan") || name.startsWith("ap") || name.startsWith("swlan") || name.startsWith("p2p") -> 2
+                    name.startsWith("eth") || name.startsWith("rndis") -> 1
+                    else -> 0
+                }
+            }
+            for (iface in sorted) {
                 if (!iface.isUp || iface.isLoopback) continue
                 for (addr in iface.inetAddresses) {
                     if (addr is Inet4Address && !addr.isLoopbackAddress) {
