@@ -1,15 +1,16 @@
 package com.example.resilentnet.ui.screens
 
-import android.content.Context
-import android.os.Bundle
 import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.foundation.Canvas
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -34,13 +35,9 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
-import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -48,42 +45,26 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableDoubleStateOf
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.PathEffect
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.StrokeJoin
-import androidx.compose.ui.graphics.drawscope.DrawScope
-import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.drawscope.rotate
-import androidx.compose.ui.graphics.nativeCanvas
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.example.resilentnet.data.location.CompassHelper
 import com.example.resilentnet.data.location.LocationProviderHelper
-import com.example.resilentnet.data.location.MapOrientationMode
-import com.example.resilentnet.data.map.MapBuilding
-import com.example.resilentnet.data.map.MapRoadEdge
-import com.example.resilentnet.data.map.OfflineCampusMap
 import com.example.resilentnet.data.map.OfflineMapData
 import com.example.resilentnet.data.map.RoutePlanner
 import com.example.resilentnet.data.map.RouteResult
 import com.example.resilentnet.data.model.HazardMarker
 import com.example.resilentnet.data.model.HazardType
 import com.example.resilentnet.data.model.PeerMapState
+import com.example.resilentnet.ui.map.OsmMapView
 import com.example.resilentnet.ui.theme.ResilientCardBg
 import com.example.resilentnet.ui.theme.ResilientCardBorder
 import com.example.resilentnet.ui.theme.ResilientErrorRed
@@ -96,24 +77,19 @@ import com.example.resilentnet.ui.theme.ResilientTextMain
 import com.example.resilentnet.ui.theme.ResilientTextSecondary
 import com.example.resilentnet.ui.theme.ResilientWarningAmber
 import com.example.resilentnet.ui.viewmodel.MeshViewModel
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
-import kotlin.math.cos
-import kotlin.math.min
+import org.osmdroid.util.GeoPoint
+import org.osmdroid.views.MapView
 import kotlin.math.roundToInt
-import kotlin.math.sin
-import kotlin.math.sqrt
 
 /**
- * Offline Tactical Vector Map & Safe-Route Navigator.
- * Features:
- * - 100% Offline 2D Vector Map Canvas (Roads, Buildings, Footprints, Labels)
- * - Hardware Compass Sensor (Heading-Up vs North-Up rotation)
- * - Live Peer Tracking with role badges (@LOC| wire piggybacking)
- * - Offline A* Safe-Route Navigation with Hazard Detour Detection
- * - Smart Snap-to-Building & Snap-to-Road hazard marking
- * - Full backward compatibility with location anchor and refresh controls
+ * HazardMapScreen — Full-Screen Tactical Map with Real-Time Spatial A* Safe Routing.
+ * Designed with a clean, floating non-overlapping UI:
+ *  - Immersive full-bleed OpenStreetMap canvas (cached offline)
+ *  - Floating top control bar with GPS status, route launcher, and mode chips
+ *  - Interactive long-press context sheet: Navigate or Report Hazard anywhere on the real map
+ *  - Smart navigation banner with turn-by-turn guidance and dynamic detour reporting
+ *  - Collapsible hazard feed bottom sheet
+ *  - Floating recenter FAB with collision-free padding
  */
 @Composable
 fun HazardMapScreen(
@@ -127,1385 +103,965 @@ fun HazardMapScreen(
     val peerLocations by viewModel.peerLocations.collectAsState()
     val peers by viewModel.peers.collectAsState()
 
-    // Map Center coordinates
     val centerLat = currentLocation?.first ?: OfflineMapData.DEFAULT_ANCHOR_LAT
     val centerLon = currentLocation?.second ?: OfflineMapData.DEFAULT_ANCHOR_LON
 
-    // Dynamic campus vector map anchored to active coordinate
     val campusMap = remember(centerLat, centerLon) {
         OfflineMapData.getMapForAnchor(centerLat, centerLon)
     }
 
-    // Compass Sensor Helper
-    val compassHelper = remember { CompassHelper(context) }
-    val azimuthDegrees by compassHelper.azimuthDegrees.collectAsState()
+    var osmMapView by remember { mutableStateOf<MapView?>(null) }
 
-    DisposableEffect(Unit) {
-        compassHelper.start()
-        onDispose { compassHelper.stop() }
-    }
+    // Navigation and A* route state
+    var targetDestCoord by remember { mutableStateOf<Pair<Double, Double>?>(null) }
+    var targetDestName by remember { mutableStateOf<String?>(null) }
+    var activeRoute by remember { mutableStateOf<RouteResult?>(null) }
+    var showRouteDialog by remember { mutableStateOf(false) }
+    var showDirections by remember { mutableStateOf(false) }
 
-    // Interactive Map Canvas State (Pan, Zoom, Orientation)
-    var panOffsetX by remember { mutableFloatStateOf(0f) }
-    var panOffsetY by remember { mutableFloatStateOf(0f) }
-    var zoomScale by remember { mutableFloatStateOf(1f) }
-    var mapRadiusMeters by remember { mutableDoubleStateOf(350.0) }
-    var orientationMode by remember { mutableStateOf(MapOrientationMode.NORTH_UP) }
-
-    // Mode toggles
+    // Interactivity state
+    var selectedMapCoord by remember { mutableStateOf<Pair<Double, Double>?>(null) }
     var isSimulationMode by remember { mutableStateOf(false) }
     var isRouteTraceMode by remember { mutableStateOf(false) }
-    var selectedHazardType by remember { mutableStateOf(HazardType.DEMOLISHED_BUILDING) }
-    var showTypeMenu by remember { mutableStateOf(false) }
+    var showHazardFeedSheet by remember { mutableStateOf(false) }
 
-    // Navigation & A* State
-    var targetDestinationCoord by remember { mutableStateOf<Pair<Double, Double>?>(null) }
-    var targetDestinationName by remember { mutableStateOf<String?>(null) }
-    var activeRouteResult by remember { mutableStateOf<RouteResult?>(null) }
-    var showRouteDialog by remember { mutableStateOf(false) }
-    var showDirectionsSheet by remember { mutableStateOf(false) }
-
-    // Dialog & UI states
+    // Hazard reporting state
     var showReportDialog by remember { mutableStateOf(false) }
-    var showLocationDialog by remember { mutableStateOf(false) }
-    var selectedPeerForAction by remember { mutableStateOf<PeerMapState?>(null) }
-    var showPeerDialog by remember { mutableStateOf(false) }
-
-    var manualLatText by remember { mutableStateOf("") }
-    var manualLonText by remember { mutableStateOf("") }
+    var reportInitialCoord by remember { mutableStateOf<Pair<Double, Double>?>(null) }
+    var selectedHazardType by remember { mutableStateOf(HazardType.DEMOLISHED_BUILDING) }
     var reportDescription by remember { mutableStateOf("") }
     val tracedPoints = remember { mutableStateListOf<Pair<Double, Double>>() }
-
-    // Recalculate A* safe route whenever hazards or destination changes
-    LaunchedEffect(targetDestinationCoord, hazards, centerLat, centerLon) {
-        val dest = targetDestinationCoord
-        if (dest != null) {
-            val res = RoutePlanner.calculateSafeRoute(
-                start = Pair(centerLat, centerLon),
-                destination = dest,
-                map = campusMap,
-                activeHazards = hazards
-            )
-            activeRouteResult = res
-        } else {
-            activeRouteResult = null
-        }
-    }
-
-    fun refreshGps() {
-        val best = LocationProviderHelper.getBestLastKnownLocation(context)
-        if (best != null) {
-            viewModel.updateLocation(
-                best.latitude,
-                best.longitude,
-                if (best.hasAccuracy()) best.accuracy else null,
-                best.provider ?: "gps"
-            )
-            viewModel.broadcastCurrentLocation(azimuthDegrees)
-            val accStr = if (best.hasAccuracy()) " (±${best.accuracy.toInt()}m)" else ""
-            Toast.makeText(
-                context,
-                "GPS: ${"%.4f".format(best.latitude)}, ${"%.4f".format(best.longitude)}$accStr",
-                Toast.LENGTH_SHORT
-            ).show()
-        } else {
-            Toast.makeText(context, "Scanning for GPS / Network fix...", Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    // Continuous location listener across all available providers
-    DisposableEffect(Unit) {
-        LocationProviderHelper.getBestLastKnownLocation(context)?.let { loc ->
-            viewModel.updateLocation(
-                loc.latitude,
-                loc.longitude,
-                if (loc.hasAccuracy()) loc.accuracy else null,
-                loc.provider ?: "cache"
-            )
-        }
-
-        val pair = LocationProviderHelper.registerLocationUpdates(context, 1000L) { loc ->
-            viewModel.updateLocation(
-                loc.latitude,
-                loc.longitude,
-                if (loc.hasAccuracy()) loc.accuracy else null,
-                loc.provider ?: "gps"
-            )
-        }
-
-        onDispose {
-            LocationProviderHelper.unregisterLocationUpdates(pair)
-        }
-    }
 
     val consolidatedPeers = remember(peerLocations, peers, hazards) {
         viewModel.getConsolidatedPeers()
     }
 
-    Column(
+    // Dynamic A* recalculation whenever destination, hazards, or location changes
+    LaunchedEffect(targetDestCoord, hazards, centerLat, centerLon) {
+        val dest = targetDestCoord
+        activeRoute = if (dest != null) {
+            RoutePlanner.calculateSafeRoute(
+                start = Pair(centerLat, centerLon),
+                destination = dest,
+                map = campusMap,
+                activeHazards = hazards
+            )
+        } else null
+    }
+
+    // Continuous location tracking
+    DisposableEffect(Unit) {
+        LocationProviderHelper.getBestLastKnownLocation(context)?.let { loc ->
+            viewModel.updateLocation(
+                loc.latitude, loc.longitude,
+                if (loc.hasAccuracy()) loc.accuracy else null,
+                loc.provider ?: "cache"
+            )
+        }
+        val pair = LocationProviderHelper.registerLocationUpdates(context, 2000L) { loc ->
+            viewModel.updateLocation(
+                loc.latitude, loc.longitude,
+                if (loc.hasAccuracy()) loc.accuracy else null,
+                loc.provider ?: "gps"
+            )
+        }
+        onDispose { LocationProviderHelper.unregisterLocationUpdates(pair) }
+    }
+
+    Box(
         modifier = modifier
             .fillMaxSize()
             .background(ResilientMainBg)
     ) {
-        // ── Header Bar ──────────────────────────────────────────────
-        Row(
+        // ── 1. Hero Full-Bleed Map Canvas ────────────────────────────────────
+        OsmMapView(
+            modifier = Modifier.fillMaxSize(),
+            context = context,
+            centerLat = centerLat,
+            centerLon = centerLon,
+            hazards = hazards,
+            peers = consolidatedPeers,
+            activeRoute = activeRoute,
+            tracedPoints = tracedPoints.toList(),
+            isSimulationMode = isSimulationMode,
+            onMapTap = { lat, lon ->
+                if (isRouteTraceMode) {
+                    if (tracedPoints.size < 25) tracedPoints.add(Pair(lat, lon))
+                } else if (isSimulationMode) {
+                    selectedMapCoord = Pair(lat, lon)
+                } else {
+                    // In standard mode, tapping sets context sheet for inspection
+                    selectedMapCoord = Pair(lat, lon)
+                }
+            },
+            onMapLongPress = { lat, lon ->
+                // Long press anywhere on the real map opens action sheet
+                selectedMapCoord = Pair(lat, lon)
+            },
+            mapViewRef = { osmMapView = it }
+        )
+
+        // ── 2. Floating Top Header Card ──────────────────────────────────────
+        Card(
             modifier = Modifier
+                .align(Alignment.TopCenter)
                 .fillMaxWidth()
-                .padding(horizontal = 14.dp, vertical = 8.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            colors = CardDefaults.cardColors(containerColor = ResilientCardBg.copy(alpha = 0.96f)),
+            shape = RoundedCornerShape(14.dp),
+            border = androidx.compose.foundation.BorderStroke(1.dp, ResilientCardBorder),
+            elevation = CardDefaults.cardElevation(defaultElevation = 6.dp)
         ) {
             Column(
                 modifier = Modifier
-                    .weight(1f)
-                    .clickable {
-                        manualLatText = "%.6f".format(centerLat)
-                        manualLonText = "%.6f".format(centerLon)
-                        showLocationDialog = true
-                    }
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
+                // Top Row: Title, GPS Status & Refresh Button
                 Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        text = "🗺 Tactical Vector Map",
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = ResilientTextMain
-                    )
-                    // Status Badge
-                    val acc = locationState.accuracyMeters
-                    val badgeColor = when {
-                        locationState.isRealFix && acc != null -> ResilientPrimaryGreen
-                        locationState.provider.startsWith("peer") || locationState.provider.startsWith("hazard") || locationState.provider == "manual" -> ResilientInfoBlue
-                        else -> ResilientWarningAmber
-                    }
-                    val badgeText = when {
-                        locationState.isRealFix && acc != null -> "GPS ±${acc.toInt()}m"
-                        locationState.provider.startsWith("peer") || locationState.provider.startsWith("hazard") -> "Anchored"
-                        locationState.provider == "manual" -> "Custom"
-                        else -> "No Fix"
-                    }
-                    Box(
-                        modifier = Modifier
-                            .background(badgeColor.copy(alpha = 0.15f), RoundedCornerShape(4.dp))
-                            .padding(horizontal = 5.dp, vertical = 2.dp)
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         Text(
-                            text = badgeText,
-                            fontSize = 10.sp,
+                            text = "🗺 Tactical Map",
+                            fontSize = 15.sp,
                             fontWeight = FontWeight.Bold,
-                            color = badgeColor
+                            color = ResilientTextMain
                         )
+                        // GPS accuracy pill
+                        val gpsText = when {
+                            locationState.isRealFix && locationState.accuracyMeters != null ->
+                                "GPS ±${locationState.accuracyMeters!!.toInt()}m"
+                            locationState.provider == "manual" -> "Custom Fix"
+                            else -> "Scanning GPS"
+                        }
+                        val gpsColor = when {
+                            locationState.isRealFix -> ResilientPrimaryGreen
+                            locationState.provider == "manual" -> ResilientInfoBlue
+                            else -> ResilientWarningAmber
+                        }
+                        Box(
+                            modifier = Modifier
+                                .background(gpsColor.copy(alpha = 0.12f), RoundedCornerShape(12.dp))
+                                .border(1.dp, gpsColor.copy(alpha = 0.4f), RoundedCornerShape(12.dp))
+                                .padding(horizontal = 8.dp, vertical = 2.dp)
+                        ) {
+                            Text(
+                                text = "📡 $gpsText",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = gpsColor
+                            )
+                        }
                     }
-                }
-                Text(
-                    text = "📍 ${"%.4f".format(centerLat)}, ${"%.4f".format(centerLon)} (Tap to edit/anchor)",
-                    fontSize = 11.sp,
-                    color = ResilientTextSecondary
-                )
-            }
 
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                // Refresh GPS button
-                OutlinedButton(
-                    onClick = { refreshGps() },
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = ResilientPrimaryGreen),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, ResilientCardBorder),
-                    shape = RoundedCornerShape(6.dp),
-                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
-                ) {
-                    Text(text = "🔄 GPS", fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-                }
-
-                // Safe Route Dialog Button
-                Button(
-                    onClick = { showRouteDialog = true },
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = if (targetDestinationCoord != null) ResilientInfoBlue else ResilientPrimaryGreen
-                    ),
-                    shape = RoundedCornerShape(6.dp),
-                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
-                ) {
-                    Text(
-                        text = if (targetDestinationCoord != null) "🧭 Navigating" else "🧭 Route",
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = Color.White
-                    )
-                }
-            }
-        }
-
-        // ── Map Controls & Action Bar ────────────────────────────────
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 14.dp, vertical = 2.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            // Hazard type dropdown
-            Box(modifier = Modifier.weight(1f)) {
-                OutlinedButton(
-                    onClick = { showTypeMenu = true },
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = ResilientTextMain),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, ResilientCardBorder),
-                    shape = RoundedCornerShape(6.dp),
-                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
-                ) {
-                    Text(
-                        text = "${hazardTypeEmoji(selectedHazardType)} ${selectedHazardType.label}",
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1
-                    )
-                }
-                DropdownMenu(
-                    expanded = showTypeMenu,
-                    onDismissRequest = { showTypeMenu = false }
-                ) {
-                    HazardType.entries.forEach { type ->
-                        DropdownMenuItem(
-                            text = { Text("${hazardTypeEmoji(type)} ${type.label}", fontSize = 12.sp) },
-                            onClick = {
-                                selectedHazardType = type
-                                showTypeMenu = false
+                    // Recenter GPS Button
+                    TextButton(
+                        onClick = {
+                            val best = LocationProviderHelper.getBestLastKnownLocation(context)
+                            if (best != null) {
+                                viewModel.updateLocation(
+                                    best.latitude, best.longitude,
+                                    if (best.hasAccuracy()) best.accuracy else null,
+                                    best.provider ?: "gps"
+                                )
+                                osmMapView?.controller?.animateTo(GeoPoint(best.latitude, best.longitude))
+                                Toast.makeText(context, "Centered on GPS: %.4f, %.4f".format(best.latitude, best.longitude), Toast.LENGTH_SHORT).show()
+                            } else {
+                                Toast.makeText(context, "Scanning for GPS fix...", Toast.LENGTH_SHORT).show()
                             }
+                        },
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                    ) {
+                        Text("🔄 Sync", fontSize = 11.sp, color = ResilientPrimaryGreen, fontWeight = FontWeight.Bold)
+                    }
+                }
+
+                // Bottom Action Row: Route Selector, Report Button, Mode Toggles
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // Navigate / Route Button
+                    Button(
+                        onClick = { showRouteDialog = true },
+                        colors = ButtonDefaults.buttonColors(containerColor = ResilientPrimaryGreen),
+                        shape = RoundedCornerShape(8.dp),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                        modifier = Modifier.weight(1.1f)
+                    ) {
+                        Text("🧭 Navigate", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                    }
+
+                    // Report Hazard Button
+                    Button(
+                        onClick = {
+                            reportInitialCoord = Pair(centerLat, centerLon)
+                            showReportDialog = true
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = ResilientErrorRed),
+                        shape = RoundedCornerShape(8.dp),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("⚠️ Report", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                    }
+
+                    // Hazard Feed Toggle Chip
+                    OutlinedButton(
+                        onClick = { showHazardFeedSheet = !showHazardFeedSheet },
+                        shape = RoundedCornerShape(8.dp),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            containerColor = if (showHazardFeedSheet) ResilientInfoBlue.copy(0.12f) else ResilientInputBg
+                        ),
+                        border = androidx.compose.foundation.BorderStroke(
+                            1.dp,
+                            if (showHazardFeedSheet) ResilientInfoBlue else ResilientCardBorder
+                        ),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp)
+                    ) {
+                        Text(
+                            text = "📋 ${hazards.size}",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = if (showHazardFeedSheet) ResilientInfoBlue else ResilientTextMain
+                        )
+                    }
+
+                    // Simulation Test Mode Chip
+                    OutlinedButton(
+                        onClick = {
+                            isSimulationMode = !isSimulationMode
+                            if (!isSimulationMode) isRouteTraceMode = false
+                        },
+                        shape = RoundedCornerShape(8.dp),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            containerColor = if (isSimulationMode) ResilientWarningAmber.copy(0.15f) else ResilientInputBg
+                        ),
+                        border = androidx.compose.foundation.BorderStroke(
+                            1.dp,
+                            if (isSimulationMode) ResilientWarningAmber else ResilientCardBorder
+                        ),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp)
+                    ) {
+                        Text(
+                            text = if (isSimulationMode) "🧪 On" else "🧪 Sim",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = if (isSimulationMode) ResilientWarningAmber else ResilientTextSecondary
                         )
                     }
                 }
             }
-
-            // Route Mode vs Point Mode
-            OutlinedButton(
-                onClick = {
-                    isRouteTraceMode = !isRouteTraceMode
-                    if (!isRouteTraceMode) tracedPoints.clear()
-                },
-                colors = ButtonDefaults.outlinedButtonColors(
-                    contentColor = if (isRouteTraceMode) ResilientInfoBlue else ResilientTextSecondary
-                ),
-                border = androidx.compose.foundation.BorderStroke(
-                    1.dp,
-                    if (isRouteTraceMode) ResilientInfoBlue else ResilientCardBorder
-                ),
-                shape = RoundedCornerShape(6.dp),
-                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
-            ) {
-                Text(
-                    text = if (isRouteTraceMode) "🛤 Route (${tracedPoints.size})" else "📌 Point",
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.SemiBold
-                )
-            }
-
-            // Test Mode Toggle
-            OutlinedButton(
-                onClick = { isSimulationMode = !isSimulationMode },
-                colors = ButtonDefaults.outlinedButtonColors(
-                    contentColor = if (isSimulationMode) ResilientWarningAmber else ResilientTextSecondary
-                ),
-                border = androidx.compose.foundation.BorderStroke(
-                    1.dp,
-                    if (isSimulationMode) ResilientWarningAmber else ResilientCardBorder
-                ),
-                shape = RoundedCornerShape(6.dp),
-                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
-            ) {
-                Text(
-                    text = if (isSimulationMode) "🧪 Test: ON" else "🧪 Test: OFF",
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.SemiBold
-                )
-            }
         }
 
-        Spacer(modifier = Modifier.height(4.dp))
-
-        // ── 2D Interactive Vector Map Canvas ─────────────────────────
-        Card(
+        // ── 3. Active Navigation Banner ──────────────────────────────────────
+        AnimatedVisibility(
+            visible = activeRoute != null,
+            enter = slideInVertically() + fadeIn(),
+            exit = slideOutVertically() + fadeOut(),
             modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 14.dp)
-                .height(310.dp),
-            colors = CardDefaults.cardColors(containerColor = ResilientCardBg),
-            shape = RoundedCornerShape(12.dp),
-            border = androidx.compose.foundation.BorderStroke(1.dp, ResilientCardBorder),
-            elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+                .align(Alignment.TopCenter)
+                .padding(top = 110.dp, start = 12.dp, end = 12.dp)
         ) {
-            Box(modifier = Modifier.fillMaxSize()) {
-                Canvas(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .pointerInput(Unit) {
-                            // Pan & Pinch-to-zoom gestures
-                            detectTransformGestures { _, pan, zoom, _ ->
-                                panOffsetX += pan.x
-                                panOffsetY += pan.y
-                                zoomScale = (zoomScale * zoom).coerceIn(0.4f, 4.0f)
+            activeRoute?.let { route ->
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = if (route.isBlocked) ResilientErrorRed.copy(0.95f)
+                        else if (route.isDetour) ResilientCardBg.copy(0.96f)
+                        else ResilientCardBg.copy(0.96f)
+                    ),
+                    shape = RoundedCornerShape(12.dp),
+                    border = androidx.compose.foundation.BorderStroke(
+                        1.5.dp,
+                        if (route.isBlocked) ResilientErrorRed
+                        else if (route.isDetour) ResilientWarningAmber
+                        else ResilientPrimaryGreen
+                    ),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "🏁 ${targetDestName ?: "Active Destination"}",
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (route.isBlocked) Color.White else ResilientTextMain
+                                )
+                                val statusText = when {
+                                    route.isBlocked -> "⛔ ALL PATHS BLOCKED BY HAZARDS"
+                                    route.isDetour -> "⚠️ Safe Detour: ${route.totalDistanceMeters}m • ~${route.estimatedWalkMinutes} min"
+                                    else -> "✅ Safe Route: ${route.totalDistanceMeters}m • ~${route.estimatedWalkMinutes} min"
+                                }
+                                Text(
+                                    text = statusText,
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = when {
+                                        route.isBlocked -> Color.White.copy(0.9f)
+                                        route.isDetour -> ResilientWarningAmber
+                                        else -> ResilientPrimaryGreen
+                                    }
+                                )
+                            }
+
+                            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                TextButton(
+                                    onClick = { showDirections = !showDirections },
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                                ) {
+                                    Text(
+                                        text = if (showDirections) "Hide" else "Steps",
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = if (route.isBlocked) Color.White else ResilientInfoBlue
+                                    )
+                                }
+                                TextButton(
+                                    onClick = {
+                                        targetDestCoord = null
+                                        targetDestName = null
+                                        activeRoute = null
+                                    },
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                                ) {
+                                    Text("✕ Exit", fontSize = 11.sp, color = if (route.isBlocked) Color.White else ResilientErrorRed)
+                                }
                             }
                         }
-                        .pointerInput(isSimulationMode, isRouteTraceMode, mapRadiusMeters, zoomScale, panOffsetX, panOffsetY) {
-                            // Tap handling for reporting hazards or selecting nodes
-                            detectTapGestures { tapOffset ->
-                                val canvasW = size.width.toFloat()
-                                val canvasH = size.height.toFloat()
-                                val cx = canvasW / 2f + panOffsetX
-                                val cy = canvasH / 2f + panOffsetY
-                                val maxR = min(canvasW, canvasH) / 2f - 10f
-                                val scale = (maxR / mapRadiusMeters.toFloat()) * zoomScale
 
-                                // Invert pan and scale back to lat/lon
-                                val dxMeters = (tapOffset.x - cx) / scale
-                                val dyMeters = -(tapOffset.y - cy) / scale
-                                val cosLat = cos(Math.toRadians(centerLat))
-                                val tapLat = centerLat + dyMeters / 111320.0
-                                val tapLon = centerLon + dxMeters / (111320.0 * cosLat)
-
-                                if (isSimulationMode) {
-                                    // Smart Snap to nearest building or road
-                                    val nearBuilding = OfflineMapData.findNearestBuilding(tapLat, tapLon, campusMap, 35.0)
-                                    val nearRoad = OfflineMapData.findNearestRoadSegment(tapLat, tapLon, campusMap, 25.0)
-
-                                    if (isRouteTraceMode) {
-                                        if (tracedPoints.size < 12) {
-                                            tracedPoints.add(Pair(tapLat, tapLon))
-                                        }
-                                    } else {
-                                        tracedPoints.clear()
-                                        if (selectedHazardType == HazardType.DEMOLISHED_BUILDING && nearBuilding != null) {
-                                            tracedPoints.add(nearBuilding.center)
-                                            reportDescription = "Collapsed: ${nearBuilding.name}"
-                                        } else if (nearRoad != null) {
-                                            tracedPoints.add(Pair(tapLat, tapLon))
-                                            reportDescription = "Blocked: ${nearRoad.name}"
-                                        } else {
-                                            tracedPoints.add(Pair(tapLat, tapLon))
-                                            reportDescription = selectedHazardType.label
-                                        }
-                                        showReportDialog = true
+                        // Turn-by-Turn expandable steps
+                        AnimatedVisibility(visible = showDirections) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(top = 8.dp)
+                            ) {
+                                HorizontalDivider(color = ResilientCardBorder)
+                                Spacer(Modifier.height(6.dp))
+                                LazyColumn(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(130.dp),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    items(route.turnByTurnSteps) { step ->
+                                        Text(
+                                            text = "• $step",
+                                            fontSize = 11.sp,
+                                            color = if (step.startsWith("⚠️") || step.startsWith("⛔"))
+                                                ResilientWarningAmber else ResilientTextMain,
+                                            lineHeight = 15.sp
+                                        )
                                     }
                                 }
                             }
                         }
-                ) {
-                    drawVectorMap(
-                        centerLat = centerLat,
-                        centerLon = centerLon,
-                        radiusMeters = mapRadiusMeters,
-                        zoomScale = zoomScale,
-                        panOffsetX = panOffsetX,
-                        panOffsetY = panOffsetY,
-                        orientationMode = orientationMode,
-                        azimuth = azimuthDegrees,
-                        map = campusMap,
-                        hazards = hazards,
-                        peers = consolidatedPeers,
-                        activeRoute = activeRouteResult,
-                        tracedPoints = tracedPoints.toList(),
-                        isRouteMode = isRouteTraceMode
-                    )
-                }
-
-                // ── Compass HUD Overlay (Top-Right) ──────────────────
-                Card(
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .padding(8.dp)
-                        .clickable {
-                            orientationMode = if (orientationMode == MapOrientationMode.NORTH_UP)
-                                MapOrientationMode.HEADING_UP else MapOrientationMode.NORTH_UP
-                        },
-                    colors = CardDefaults.cardColors(containerColor = ResilientCardBg.copy(alpha = 0.92f)),
-                    shape = RoundedCornerShape(8.dp),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, ResilientCardBorder)
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Text(
-                            text = CompassHelper.formatHeading(azimuthDegrees),
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            fontFamily = FontFamily.Monospace,
-                            color = ResilientTextMain
-                        )
-                        Box(
-                            modifier = Modifier
-                                .background(ResilientSoftGreen, RoundedCornerShape(4.dp))
-                                .padding(horizontal = 4.dp, vertical = 2.dp)
-                        ) {
-                            Text(
-                                text = orientationMode.label,
-                                fontSize = 9.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = ResilientPrimaryGreen
-                            )
-                        }
-                    }
-                }
-
-                // ── Map Floating Controls (Recenter & Zoom) ───────────
-                Row(
-                    modifier = Modifier
-                        .align(Alignment.BottomEnd)
-                        .padding(8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    if (panOffsetX != 0f || panOffsetY != 0f || zoomScale != 1f) {
-                        Button(
-                            onClick = {
-                                panOffsetX = 0f
-                                panOffsetY = 0f
-                                zoomScale = 1f
-                            },
-                            colors = ButtonDefaults.buttonColors(containerColor = ResilientCardBg.copy(alpha = 0.9f)),
-                            border = androidx.compose.foundation.BorderStroke(1.dp, ResilientCardBorder),
-                            shape = RoundedCornerShape(6.dp),
-                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
-                        ) {
-                            Text("🎯 Recenter", fontSize = 10.sp, color = ResilientTextMain, fontWeight = FontWeight.Bold)
-                        }
-                    }
-
-                    // Scale Bar text
-                    Box(
-                        modifier = Modifier
-                            .background(ResilientCardBg.copy(alpha = 0.9f), RoundedCornerShape(4.dp))
-                            .padding(horizontal = 6.dp, vertical = 3.dp)
-                    ) {
-                        val currentSpanMeters = (mapRadiusMeters / zoomScale).roundToInt()
-                        Text(
-                            text = "${currentSpanMeters}m",
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = ResilientTextSecondary
-                        )
                     }
                 }
             }
         }
 
-        // ── Active Navigation Summary Card ───────────────────────────
-        if (activeRouteResult != null) {
-            val route = activeRouteResult!!
+        // ── 4. Route Tracing Banner (when tracing in Simulation mode) ────────
+        if (isSimulationMode && isRouteTraceMode) {
             Card(
                 modifier = Modifier
+                    .align(Alignment.BottomCenter)
                     .fillMaxWidth()
-                    .padding(horizontal = 14.dp, vertical = 4.dp),
-                colors = CardDefaults.cardColors(containerColor = if (route.isBlocked) ResilientErrorRed.copy(alpha = 0.1f) else ResilientInfoBlue.copy(alpha = 0.08f)),
-                shape = RoundedCornerShape(10.dp),
-                border = androidx.compose.foundation.BorderStroke(1.dp, if (route.isBlocked) ResilientErrorRed else ResilientInfoBlue.copy(alpha = 0.4f))
+                    .padding(start = 14.dp, end = 14.dp, bottom = 80.dp),
+                colors = CardDefaults.cardColors(containerColor = ResilientCardBg.copy(0.95f)),
+                shape = RoundedCornerShape(12.dp),
+                border = androidx.compose.foundation.BorderStroke(1.dp, ResilientInfoBlue),
+                elevation = CardDefaults.cardElevation(defaultElevation = 6.dp)
             ) {
-                Column(modifier = Modifier.padding(10.dp)) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 14.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "🛤 Tracing Hazard: ${tracedPoints.size} pts",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = ResilientInfoBlue
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        TextButton(
+                            onClick = { tracedPoints.clear() },
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                        ) {
+                            Text("Clear", fontSize = 11.sp, color = ResilientTextSecondary)
+                        }
+                        Button(
+                            onClick = {
+                                if (tracedPoints.size >= 2) {
+                                    reportInitialCoord = tracedPoints.first()
+                                    showReportDialog = true
+                                } else {
+                                    Toast.makeText(context, "Tap at least 2 points along the path", Toast.LENGTH_SHORT).show()
+                                }
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = ResilientErrorRed),
+                            shape = RoundedCornerShape(6.dp),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                        ) {
+                            Text("Submit Trace", fontSize = 11.sp, color = Color.White)
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── 5. Recenter Floating Action Button (FAB) ─────────────────────────
+        val fabBottomPadding = when {
+            showHazardFeedSheet -> 280.dp
+            selectedMapCoord != null -> 160.dp
+            isSimulationMode && isRouteTraceMode -> 140.dp
+            else -> 24.dp
+        }
+        Button(
+            onClick = {
+                osmMapView?.controller?.animateTo(GeoPoint(centerLat, centerLon))
+            },
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(end = 16.dp, bottom = fabBottomPadding),
+            shape = CircleShape,
+            colors = ButtonDefaults.buttonColors(containerColor = ResilientCardBg),
+            border = androidx.compose.foundation.BorderStroke(1.5.dp, ResilientCardBorder),
+            contentPadding = PaddingValues(12.dp),
+            elevation = ButtonDefaults.buttonElevation(defaultElevation = 6.dp)
+        ) {
+            Text("🎯", fontSize = 20.sp)
+        }
+
+        // ── 6. Long-Press / Map Tap Context Action Card ───────────────────────
+        selectedMapCoord?.let { coord ->
+            val distFromUser = OfflineMapData.calculateDistanceMeters(
+                centerLat, centerLon, coord.first, coord.second
+            ).roundToInt()
+
+            Card(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .padding(start = 12.dp, end = 12.dp, bottom = 12.dp),
+                colors = CardDefaults.cardColors(containerColor = ResilientCardBg),
+                shape = RoundedCornerShape(16.dp),
+                border = androidx.compose.foundation.BorderStroke(1.dp, ResilientCardBorder),
+                elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Column(modifier = Modifier.weight(1f)) {
+                        Column {
                             Text(
-                                text = "To: ${targetDestinationName ?: "Destination"}",
+                                text = "📍 Selected Map Location",
                                 fontSize = 13.sp,
                                 fontWeight = FontWeight.Bold,
                                 color = ResilientTextMain
                             )
-                            if (route.isBlocked) {
-                                Text(
-                                    text = "⛔ All connecting paths blocked by hazards!",
-                                    fontSize = 11.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = ResilientErrorRed
-                                )
-                            } else {
-                                Text(
-                                    text = "${route.totalDistanceMeters}m • ~${route.estimatedWalkMinutes} min walk" +
-                                            if (route.isDetour) " • ⚠️ Detour Active" else " • Optimal Path",
-                                    fontSize = 11.sp,
-                                    color = if (route.isDetour) ResilientWarningAmber else ResilientTextSecondary
-                                )
-                            }
-                        }
-
-                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            OutlinedButton(
-                                onClick = { showDirectionsSheet = !showDirectionsSheet },
-                                shape = RoundedCornerShape(6.dp),
-                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
-                            ) {
-                                Text(if (showDirectionsSheet) "Hide" else "Steps", fontSize = 10.sp)
-                            }
-                            IconButton(
-                                onClick = {
-                                    targetDestinationCoord = null
-                                    targetDestinationName = null
-                                    activeRouteResult = null
-                                },
-                                modifier = Modifier.size(28.dp)
-                            ) {
-                                Text("✕", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = ResilientTextSecondary)
-                            }
-                        }
-                    }
-
-                    // Collapsible Turn-by-Turn Steps
-                    AnimatedVisibility(visible = showDirectionsSheet) {
-                        Column(modifier = Modifier.padding(top = 8.dp)) {
-                            HorizontalDivider(color = ResilientCardBorder)
-                            Spacer(modifier = Modifier.height(4.dp))
-                            route.turnByTurnSteps.forEachIndexed { idx, step ->
-                                Text(
-                                    text = "${idx + 1}. $step",
-                                    fontSize = 11.sp,
-                                    color = if (step.startsWith("⚠️")) ResilientWarningAmber else ResilientTextMain,
-                                    modifier = Modifier.padding(vertical = 2.dp)
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // ── Hazard & Peer Feed ───────────────────────────────────────
-        Text(
-            text = "HAZARD REPORTS (${hazards.size}) • PEERS ONLINE (${consolidatedPeers.size})",
-            fontSize = 11.sp,
-            fontWeight = FontWeight.SemiBold,
-            color = ResilientTextSecondary,
-            letterSpacing = 0.5.sp,
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 2.dp)
-        )
-
-        LazyColumn(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth(),
-            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 2.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp)
-        ) {
-            items(hazards.sortedByDescending { it.timestamp }) { hazard ->
-                HazardFeedCard(
-                    hazard = hazard,
-                    distanceMeters = hazard.distanceTo(centerLat, centerLon),
-                    onAlignRadar = if (hazard.senderId != viewModel.myNodeId) {
-                        {
-                            viewModel.setAnchorCoordinates(
-                                hazard.latitude,
-                                hazard.longitude,
-                                "Node ${hazard.senderId}"
-                            )
-                            Toast.makeText(
-                                context,
-                                "Map anchored to Node ${hazard.senderId} coordinates!",
-                                Toast.LENGTH_SHORT
-                            ).show()
-                        }
-                    } else null,
-                    onRouteToHazard = {
-                        targetDestinationCoord = Pair(hazard.latitude, hazard.longitude)
-                        targetDestinationName = hazard.description.ifBlank { hazard.type.label }
-                    }
-                )
-            }
-
-            if (hazards.isEmpty()) {
-                item {
-                    Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = CardDefaults.cardColors(containerColor = ResilientCardBg),
-                        shape = RoundedCornerShape(10.dp),
-                        border = androidx.compose.foundation.BorderStroke(1.dp, ResilientCardBorder)
-                    ) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(16.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally
-                        ) {
-                            Text("🗺", fontSize = 26.sp)
-                            Spacer(modifier = Modifier.height(4.dp))
                             Text(
-                                text = "Zero Hazards Reported",
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = ResilientTextMain
-                            )
-                            Text(
-                                text = "Tap map in Test mode to simulate roads/buildings, or tap Route to navigate.",
+                                text = "%.4f, %.4f • %dm away".format(coord.first, coord.second, distFromUser),
                                 fontSize = 11.sp,
                                 color = ResilientTextSecondary
                             )
                         }
+                        TextButton(
+                            onClick = { selectedMapCoord = null },
+                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp)
+                        ) {
+                            Text("✕", fontSize = 16.sp, color = ResilientTextSecondary)
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        // Route Here Button
+                        Button(
+                            onClick = {
+                                targetDestCoord = coord
+                                targetDestName = "Pin (%.4f, %.4f)".format(coord.first, coord.second)
+                                selectedMapCoord = null
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = ResilientPrimaryGreen),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.weight(1f),
+                            contentPadding = PaddingValues(vertical = 10.dp)
+                        ) {
+                            Text("🧭 Route Here", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                        }
+
+                        // Report Hazard Here Button
+                        Button(
+                            onClick = {
+                                reportInitialCoord = coord
+                                showReportDialog = true
+                                selectedMapCoord = null
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = ResilientErrorRed),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier.weight(1f),
+                            contentPadding = PaddingValues(vertical = 10.dp)
+                        ) {
+                            Text("⚠️ Report Hazard", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── 7. Collapsible Hazard Feed Bottom Sheet ──────────────────────────
+        AnimatedVisibility(
+            visible = showHazardFeedSheet,
+            enter = slideInVertically(initialOffsetY = { it }) + fadeIn(),
+            exit = slideOutVertically(targetOffsetY = { it }) + fadeOut(),
+            modifier = Modifier.align(Alignment.BottomCenter)
+        ) {
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(270.dp)
+                    .padding(start = 8.dp, end = 8.dp, bottom = 4.dp),
+                colors = CardDefaults.cardColors(containerColor = ResilientCardBg),
+                shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp),
+                border = androidx.compose.foundation.BorderStroke(1.dp, ResilientCardBorder),
+                elevation = CardDefaults.cardElevation(defaultElevation = 10.dp)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(12.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "⚠️ Active Mesh Hazards (${hazards.size})",
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = ResilientTextMain
+                        )
+                        TextButton(
+                            onClick = { showHazardFeedSheet = false },
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                        ) {
+                            Text("✕ Close", fontSize = 12.sp, color = ResilientTextSecondary)
+                        }
+                    }
+                    Spacer(Modifier.height(6.dp))
+
+                    if (hazards.isEmpty()) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .weight(1f),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text("No hazards reported in local mesh area.", fontSize = 12.sp, color = ResilientTextSecondary)
+                        }
+                    } else {
+                        LazyColumn(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .weight(1f),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            items(hazards.sortedByDescending { it.timestamp }) { hazard ->
+                                val dist = OfflineMapData.calculateDistanceMeters(
+                                    centerLat, centerLon, hazard.latitude, hazard.longitude
+                                ).roundToInt()
+
+                                HazardFeedCard(
+                                    hazard = hazard,
+                                    distanceMeters = dist.toDouble(),
+                                    onRouteToHazard = {
+                                        targetDestCoord = Pair(hazard.latitude, hazard.longitude)
+                                        targetDestName = hazard.description.ifBlank { hazard.type.label }
+                                        showHazardFeedSheet = false
+                                    },
+                                    onCenterOnHazard = {
+                                        osmMapView?.controller?.animateTo(GeoPoint(hazard.latitude, hazard.longitude))
+                                        showHazardFeedSheet = false
+                                    }
+                                )
+                            }
+                        }
                     }
                 }
             }
         }
     }
 
-    // ── Safe Route Selection Dialog ──────────────────────────────────
+    // ── Route Selection Dialog ────────────────────────────────────────────────
     if (showRouteDialog) {
-        AlertDialog(
-            onDismissRequest = { showRouteDialog = false },
-            title = {
-                Text(
-                    text = "🧭 Calculate Safe Route (A*)",
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = ResilientTextMain
-                )
+        RouteSelectionDialog(
+            campusMap = campusMap,
+            consolidatedPeers = consolidatedPeers,
+            centerLat = centerLat,
+            centerLon = centerLon,
+            onSelect = { coord, name ->
+                targetDestCoord = coord
+                targetDestName = name
+                showRouteDialog = false
             },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text(
-                        text = "Select a destination. The A* engine will automatically bypass all flooded roads, debris, and collapsed structures:",
-                        fontSize = 12.sp,
-                        color = ResilientTextSecondary
-                    )
+            onDismiss = { showRouteDialog = false }
+        )
+    }
 
-                    Text("CAMPUS BUILDINGS & SHELTERS:", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = ResilientTextSecondary)
-                    campusMap.buildings.take(6).forEach { bld ->
-                        OutlinedButton(
-                            onClick = {
-                                targetDestinationCoord = bld.center
-                                targetDestinationName = bld.name
-                                showRouteDialog = false
-                            },
-                            modifier = Modifier.fillMaxWidth(),
-                            colors = ButtonDefaults.outlinedButtonColors(contentColor = ResilientTextMain),
-                            border = androidx.compose.foundation.BorderStroke(1.dp, ResilientCardBorder),
-                            shape = RoundedCornerShape(6.dp),
-                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+    // ── Hazard Report Dialog ──────────────────────────────────────────────────
+    if (showReportDialog) {
+        val targetCoord = reportInitialCoord ?: Pair(centerLat, centerLon)
+        HazardReportDialog(
+            hazardType = selectedHazardType,
+            coordinate = targetCoord,
+            tracedPoints = tracedPoints.toList(),
+            isRouteMode = isRouteTraceMode,
+            description = reportDescription,
+            onTypeSelect = { selectedHazardType = it },
+            onDescriptionChange = { reportDescription = it },
+            onConfirm = {
+                val pts = if (isRouteTraceMode && tracedPoints.isNotEmpty()) tracedPoints.toList() else listOf(targetCoord)
+                viewModel.reportHazard(
+                    type = selectedHazardType,
+                    points = pts,
+                    description = reportDescription.ifBlank { selectedHazardType.label }
+                )
+                showReportDialog = false
+                reportDescription = ""
+                tracedPoints.clear()
+                isRouteTraceMode = false
+                Toast.makeText(context, "Hazard broadcasted to mesh peers", Toast.LENGTH_SHORT).show()
+            },
+            onDismiss = {
+                showReportDialog = false
+                reportDescription = ""
+            }
+        )
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Subcomponents & Dialogs
+// ─────────────────────────────────────────────────────────────────────────────
+
+@Composable
+private fun RouteSelectionDialog(
+    campusMap: com.example.resilentnet.data.map.OfflineCampusMap,
+    consolidatedPeers: List<PeerMapState>,
+    centerLat: Double,
+    centerLon: Double,
+    onSelect: (Pair<Double, Double>, String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                text = "🧭 Select Navigation Target",
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold,
+                color = ResilientTextMain
+            )
+        },
+        text = {
+            LazyColumn(
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+                modifier = Modifier.height(340.dp)
+            ) {
+                item {
+                    Text(
+                        "CAMPUS LANDMARKS & SHELTERS",
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = ResilientTextSecondary,
+                        letterSpacing = 0.8.sp
+                    )
+                }
+                items(campusMap.buildings) { bld ->
+                    val dist = OfflineMapData.calculateDistanceMeters(
+                        centerLat, centerLon, bld.center.first, bld.center.second
+                    ).roundToInt()
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onSelect(bld.center, bld.name) },
+                        colors = CardDefaults.cardColors(containerColor = ResilientInputBg),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(bld.name, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = ResilientTextMain)
+                            Text("${dist}m", fontSize = 11.sp, color = ResilientPrimaryGreen, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+
+                if (consolidatedPeers.isNotEmpty()) {
+                    item {
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            "REACHABLE MESH PEERS",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = ResilientTextSecondary,
+                            letterSpacing = 0.8.sp
+                        )
+                    }
+                    items(consolidatedPeers) { peer ->
+                        val dist = OfflineMapData.calculateDistanceMeters(
+                            centerLat, centerLon, peer.latitude, peer.longitude
+                        ).roundToInt()
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    onSelect(Pair(peer.latitude, peer.longitude), "${peer.displayName} (${peer.role})")
+                                },
+                            colors = CardDefaults.cardColors(containerColor = ResilientInfoBlue.copy(0.08f)),
+                            shape = RoundedCornerShape(8.dp),
+                            border = androidx.compose.foundation.BorderStroke(1.dp, ResilientInfoBlue.copy(0.3f))
                         ) {
                             Row(
-                                modifier = Modifier.fillMaxWidth(),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 10.dp),
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Text(bld.name, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-                                val dist = OfflineMapData.calculateDistanceMeters(centerLat, centerLon, bld.center.first, bld.center.second).roundToInt()
+                                Text("👤 ${peer.displayName}", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = ResilientInfoBlue)
                                 Text("${dist}m", fontSize = 11.sp, color = ResilientTextSecondary)
                             }
                         }
                     }
-
-                    if (consolidatedPeers.isNotEmpty()) {
-                        Text("ACTIVE MESH PEERS:", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = ResilientTextSecondary)
-                        consolidatedPeers.forEach { peer ->
-                            OutlinedButton(
-                                onClick = {
-                                    targetDestinationCoord = Pair(peer.latitude, peer.longitude)
-                                    targetDestinationName = "${peer.displayName} (${peer.role})"
-                                    showRouteDialog = false
-                                },
-                                modifier = Modifier.fillMaxWidth(),
-                                colors = ButtonDefaults.outlinedButtonColors(contentColor = ResilientInfoBlue),
-                                border = androidx.compose.foundation.BorderStroke(1.dp, ResilientInfoBlue.copy(alpha = 0.5f)),
-                                shape = RoundedCornerShape(6.dp),
-                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
-                            ) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text("👤 ${peer.displayName}", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-                                    val dist = OfflineMapData.calculateDistanceMeters(centerLat, centerLon, peer.latitude, peer.longitude).roundToInt()
-                                    Text("${dist}m", fontSize = 11.sp, color = ResilientTextSecondary)
-                                }
-                            }
-                        }
-                    }
                 }
-            },
-            confirmButton = {},
-            dismissButton = {
-                TextButton(onClick = { showRouteDialog = false }) {
-                    Text("Close", color = ResilientTextSecondary)
-                }
-            },
-            containerColor = ResilientCardBg,
-            shape = RoundedCornerShape(12.dp)
-        )
-    }
-
-    // ── Report Hazard Dialog ─────────────────────────────────────────
-    if (showReportDialog) {
-        AlertDialog(
-            onDismissRequest = {
-                showReportDialog = false
-                reportDescription = ""
-            },
-            title = {
-                Text(
-                    text = "Report ${selectedHazardType.label}",
-                    color = ResilientTextMain,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 16.sp
-                )
-            },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(
-                        text = if (isRouteTraceMode && tracedPoints.size >= 2)
-                            "Broadcasting ${tracedPoints.size}-point route to all mesh peers"
-                        else
-                            "Broadcasting point hazard at ${"%.4f".format(tracedPoints.lastOrNull()?.first ?: 0.0)}, ${"%.4f".format(tracedPoints.lastOrNull()?.second ?: 0.0)}",
-                        fontSize = 12.sp,
-                        color = ResilientTextSecondary
-                    )
-                    OutlinedTextField(
-                        value = reportDescription,
-                        onValueChange = { reportDescription = it },
-                        label = { Text("Description / Location Note") },
-                        singleLine = true,
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedContainerColor = ResilientCardBg,
-                            unfocusedContainerColor = ResilientInputBg,
-                            focusedBorderColor = ResilientPrimaryGreen,
-                            unfocusedBorderColor = ResilientCardBorder
-                        ),
-                        shape = RoundedCornerShape(8.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        viewModel.reportHazard(
-                            type = selectedHazardType,
-                            points = tracedPoints.toList(),
-                            description = reportDescription.ifBlank { selectedHazardType.label }
-                        )
-                        showReportDialog = false
-                        reportDescription = ""
-                        tracedPoints.clear()
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = ResilientErrorRed)
-                ) {
-                    Text("📡 BROADCAST MESH", color = Color.White, fontWeight = FontWeight.Bold)
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = {
-                    showReportDialog = false
-                    reportDescription = ""
-                }) {
-                    Text("Cancel", color = ResilientTextSecondary)
-                }
-            },
-            containerColor = ResilientCardBg,
-            shape = RoundedCornerShape(12.dp)
-        )
-    }
-
-    // ── Location & Anchor Dialog ─────────────────────────────────────
-    if (showLocationDialog) {
-        AlertDialog(
-            onDismissRequest = { showLocationDialog = false },
-            title = {
-                Text(
-                    text = "📍 Map Reference Anchor & GPS",
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = ResilientTextMain
-                )
-            },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    val dialogAcc = locationState.accuracyMeters
-                    val accText = if (dialogAcc != null) " (±${dialogAcc.toInt()}m)" else ""
-                    Text(
-                        text = "Center: ${"%.6f".format(centerLat)}, ${"%.6f".format(centerLon)}\n" +
-                                "Source: ${locationState.provider}$accText",
-                        fontSize = 12.sp,
-                        color = ResilientTextSecondary
-                    )
-
-                    Button(
-                        onClick = {
-                            refreshGps()
-                            showLocationDialog = false
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = ButtonDefaults.buttonColors(containerColor = ResilientPrimaryGreen),
-                        shape = RoundedCornerShape(8.dp)
-                    ) {
-                        Text("🔄 Request Fresh GPS Fix Now", fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                    }
-
-                    val latestPeerHazard = hazards.firstOrNull { it.senderId != viewModel.myNodeId }
-                    if (latestPeerHazard != null) {
-                        OutlinedButton(
-                            onClick = {
-                                viewModel.setAnchorCoordinates(
-                                    latestPeerHazard.latitude,
-                                    latestPeerHazard.longitude,
-                                    "Node ${latestPeerHazard.senderId}"
-                                )
-                                Toast.makeText(
-                                    context,
-                                    "Map anchored to Node ${latestPeerHazard.senderId} coordinates!",
-                                    Toast.LENGTH_SHORT
-                                ).show()
-                                showLocationDialog = false
-                            },
-                            modifier = Modifier.fillMaxWidth(),
-                            colors = ButtonDefaults.outlinedButtonColors(contentColor = ResilientInfoBlue),
-                            border = androidx.compose.foundation.BorderStroke(1.dp, ResilientInfoBlue),
-                            shape = RoundedCornerShape(8.dp)
-                        ) {
-                            Text(
-                                text = "🎯 Align with Peer (${latestPeerHazard.senderId})",
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                        }
-                    }
-
-                    Text("Or enter anchor coordinates manually:", fontSize = 11.sp, color = ResilientTextSecondary)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedTextField(
-                            value = manualLatText,
-                            onValueChange = { manualLatText = it },
-                            label = { Text("Latitude", fontSize = 11.sp) },
-                            modifier = Modifier.weight(1f),
-                            singleLine = true,
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedBorderColor = ResilientPrimaryGreen,
-                                unfocusedBorderColor = ResilientCardBorder
-                            )
-                        )
-                        OutlinedTextField(
-                            value = manualLonText,
-                            onValueChange = { manualLonText = it },
-                            label = { Text("Longitude", fontSize = 11.sp) },
-                            modifier = Modifier.weight(1f),
-                            singleLine = true,
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedBorderColor = ResilientPrimaryGreen,
-                                unfocusedBorderColor = ResilientCardBorder
-                            )
-                        )
-                    }
-
-                    Button(
-                        onClick = {
-                            val lat = manualLatText.toDoubleOrNull()
-                            val lon = manualLonText.toDoubleOrNull()
-                            if (lat != null && lon != null) {
-                                viewModel.setAnchorCoordinates(lat, lon, "manual")
-                                Toast.makeText(context, "Anchor coordinates updated!", Toast.LENGTH_SHORT).show()
-                                showLocationDialog = false
-                            } else {
-                                Toast.makeText(context, "Invalid coordinates format", Toast.LENGTH_SHORT).show()
-                            }
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = ButtonDefaults.buttonColors(containerColor = ResilientInputBg),
-                        border = androidx.compose.foundation.BorderStroke(1.dp, ResilientCardBorder),
-                        shape = RoundedCornerShape(8.dp)
-                    ) {
-                        Text("Set Custom Map Center", color = ResilientTextMain, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-                    }
-                }
-            },
-            confirmButton = {},
-            dismissButton = {
-                TextButton(onClick = { showLocationDialog = false }) {
-                    Text("Close", color = ResilientTextSecondary)
-                }
-            },
-            containerColor = ResilientCardBg,
-            shape = RoundedCornerShape(12.dp)
-        )
-    }
-
-    // ── Peer Quick Action Dialog ─────────────────────────────────────
-    if (showPeerDialog && selectedPeerForAction != null) {
-        val peer = selectedPeerForAction!!
-        AlertDialog(
-            onDismissRequest = { showPeerDialog = false },
-            title = {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text("👤 ${peer.displayName}", fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                    Box(
-                        modifier = Modifier
-                            .background(if (peer.role == "ADMIN") ResilientInfoBlue.copy(alpha = 0.15f) else ResilientPrimaryGreen.copy(alpha = 0.15f), RoundedCornerShape(4.dp))
-                            .padding(horizontal = 6.dp, vertical = 2.dp)
-                    ) {
-                        Text(peer.role, fontSize = 10.sp, fontWeight = FontWeight.Bold, color = if (peer.role == "ADMIN") ResilientInfoBlue else ResilientPrimaryGreen)
-                    }
-                }
-            },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    val dist = OfflineMapData.calculateDistanceMeters(centerLat, centerLon, peer.latitude, peer.longitude).roundToInt()
-                    Text("Node ID: ${peer.peerId}\nDistance: ${dist}m\nCoordinates: ${"%.4f".format(peer.latitude)}, ${"%.4f".format(peer.longitude)}", fontSize = 12.sp, color = ResilientTextSecondary)
-
-                    Button(
-                        onClick = {
-                            targetDestinationCoord = Pair(peer.latitude, peer.longitude)
-                            targetDestinationName = "${peer.displayName} (${peer.role})"
-                            showPeerDialog = false
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = ButtonDefaults.buttonColors(containerColor = ResilientInfoBlue),
-                        shape = RoundedCornerShape(8.dp)
-                    ) {
-                        Text("🧭 Calculate Safe Route to Peer", fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                    }
-
-                    OutlinedButton(
-                        onClick = {
-                            viewModel.setAnchorCoordinates(peer.latitude, peer.longitude, "Node ${peer.peerId}")
-                            Toast.makeText(context, "Radar anchored to ${peer.displayName}!", Toast.LENGTH_SHORT).show()
-                            showPeerDialog = false
-                        },
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = ButtonDefaults.outlinedButtonColors(contentColor = ResilientPrimaryGreen),
-                        border = androidx.compose.foundation.BorderStroke(1.dp, ResilientPrimaryGreen),
-                        shape = RoundedCornerShape(8.dp)
-                    ) {
-                        Text("🎯 Align Anchor with Peer", fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                    }
-                }
-            },
-            confirmButton = {},
-            dismissButton = {
-                TextButton(onClick = { showPeerDialog = false }) {
-                    Text("Close", color = ResilientTextSecondary)
-                }
-            },
-            containerColor = ResilientCardBg,
-            shape = RoundedCornerShape(12.dp)
-        )
-    }
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Close", color = ResilientTextSecondary) }
+        },
+        containerColor = ResilientCardBg,
+        shape = RoundedCornerShape(14.dp)
+    )
 }
 
-// ─────────────────────────────────────────────────────────────────────
-// Full Offline Vector Map Drawing Engine
-// ─────────────────────────────────────────────────────────────────────
-
-private fun DrawScope.drawVectorMap(
-    centerLat: Double,
-    centerLon: Double,
-    radiusMeters: Double,
-    zoomScale: Float,
-    panOffsetX: Float,
-    panOffsetY: Float,
-    orientationMode: MapOrientationMode,
-    azimuth: Float,
-    map: OfflineCampusMap,
-    hazards: List<HazardMarker>,
-    peers: List<PeerMapState>,
-    activeRoute: RouteResult?,
+@Composable
+private fun HazardReportDialog(
+    hazardType: HazardType,
+    coordinate: Pair<Double, Double>,
     tracedPoints: List<Pair<Double, Double>>,
-    isRouteMode: Boolean
+    isRouteMode: Boolean,
+    description: String,
+    onTypeSelect: (HazardType) -> Unit,
+    onDescriptionChange: (String) -> Unit,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit
 ) {
-    val canvasW = size.width
-    val canvasH = size.height
-    val cx = canvasW / 2f + panOffsetX
-    val cy = canvasH / 2f + panOffsetY
-    val maxR = min(canvasW, canvasH) / 2f - 10f
-    val scale = (maxR / radiusMeters.toFloat()) * zoomScale
-
-    val cosLat = cos(Math.toRadians(centerLat))
-
-    // Helper: translate (lat, lon) to canvas (x, y) relative to center
-    fun toScreen(lat: Double, lon: Double): Offset {
-        val dx = ((lon - centerLon) * 111320.0 * cosLat * scale).toFloat()
-        val dy = -((lat - centerLat) * 111320.0 * scale).toFloat() // Y is inverted on canvas
-        return Offset(cx + dx, cy + dy)
-    }
-
-    val rotationAngle = if (orientationMode == MapOrientationMode.HEADING_UP) -azimuth else 0f
-
-    rotate(degrees = rotationAngle, pivot = Offset(cx, cy)) {
-
-        // ── Layer 1: Subtle Grid Lines ───────────────────────────────
-        val gridStepMeters = (50.0 * scale).toFloat()
-        val gridColor = Color(0x18000000)
-        var gx = (cx % gridStepMeters)
-        while (gx < canvasW + 200f) {
-            drawLine(gridColor, Offset(gx - 200f, -200f), Offset(gx - 200f, canvasH + 200f), strokeWidth = 1f)
-            gx += gridStepMeters
-        }
-        var gy = (cy % gridStepMeters)
-        while (gy < canvasH + 200f) {
-            drawLine(gridColor, Offset(-200f, gy - 200f), Offset(canvasW + 200f, gy - 200f), strokeWidth = 1f)
-            gy += gridStepMeters
-        }
-
-        // ── Layer 2: Road Network ────────────────────────────────────
-        val blockedRoadIds = activeRoute?.blockedRoadEdges?.map { it.id }?.toSet() ?: emptySet()
-
-        val textPaint = android.graphics.Paint().apply {
-            color = android.graphics.Color.parseColor("#4B5563")
-            textSize = 20f
-            isAntiAlias = true
-            textAlign = android.graphics.Paint.Align.CENTER
-        }
-
-        val blockedPaint = android.graphics.Paint().apply {
-            color = android.graphics.Color.parseColor("#DC2626")
-            textSize = 20f
-            isFakeBoldText = true
-            isAntiAlias = true
-            textAlign = android.graphics.Paint.Align.CENTER
-        }
-
-        for (road in map.roads) {
-            val p1 = toScreen(road.pathPoints[0].first, road.pathPoints[0].second)
-            val p2 = toScreen(road.pathPoints[1].first, road.pathPoints[1].second)
-            val isBlocked = blockedRoadIds.contains(road.id)
-
-            if (isBlocked) {
-                // Red/Amber hatched warning line for blocked roads
-                drawLine(
-                    color = Color(0xFFDC2626),
-                    start = p1,
-                    end = p2,
-                    strokeWidth = 12f * zoomScale.coerceIn(0.8f, 2.0f),
-                    cap = StrokeCap.Round
-                )
-                drawLine(
-                    color = Color(0xFFFEF2F2),
-                    start = p1,
-                    end = p2,
-                    strokeWidth = 6f * zoomScale.coerceIn(0.8f, 2.0f),
-                    cap = StrokeCap.Round,
-                    pathEffect = PathEffect.dashPathEffect(floatArrayOf(12f, 8f))
-                )
-                // Draw blocked label at midpoint
-                val midX = (p1.x + p2.x) / 2f
-                val midY = (p1.y + p2.y) / 2f
-                drawContext.canvas.nativeCanvas.drawText("⛔ BLOCKED", midX, midY - 6f, blockedPaint)
-            } else {
-                // Normal road: casing + asphalt fill
-                drawLine(
-                    color = Color(0xFFD1D5DB),
-                    start = p1,
-                    end = p2,
-                    strokeWidth = 10f * zoomScale.coerceIn(0.8f, 2.0f),
-                    cap = StrokeCap.Round
-                )
-                drawLine(
-                    color = Color(0xFFF9FAFB),
-                    start = p1,
-                    end = p2,
-                    strokeWidth = 6f * zoomScale.coerceIn(0.8f, 2.0f),
-                    cap = StrokeCap.Round
-                )
-                // Draw street name label if zoom is sufficient
-                if (zoomScale >= 0.8f) {
-                    val midX = (p1.x + p2.x) / 2f
-                    val midY = (p1.y + p2.y) / 2f
-                    drawContext.canvas.nativeCanvas.drawText(road.name, midX, midY - 4f, textPaint)
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Box(
+                    modifier = Modifier
+                        .size(36.dp)
+                        .background(hazardColor(hazardType).copy(alpha = 0.15f), CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(hazardEmoji(hazardType), fontSize = 18.sp)
+                }
+                Column {
+                    Text("Report Hazard", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = ResilientTextMain)
+                    Text("Broadcasted peer-to-peer to all mesh nodes", fontSize = 11.sp, color = ResilientTextSecondary)
                 }
             }
-        }
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    text = "SELECT HAZARD TYPE",
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = ResilientTextSecondary,
+                    letterSpacing = 0.6.sp
+                )
 
-        // ── Layer 3: Building Footprints ─────────────────────────────
-        val bldPaint = android.graphics.Paint().apply {
-            color = android.graphics.Color.parseColor("#1F2937")
-            textSize = 21f
-            isFakeBoldText = true
-            isAntiAlias = true
-            textAlign = android.graphics.Paint.Align.CENTER
-        }
+                // Hazard Type Selector Chips
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    HazardType.entries.forEach { type ->
+                        val isSelected = type == hazardType
+                        val color = hazardColor(type)
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .background(
+                                    if (isSelected) color.copy(alpha = 0.15f) else ResilientInputBg,
+                                    RoundedCornerShape(8.dp)
+                                )
+                                .border(
+                                    1.dp,
+                                    if (isSelected) color else ResilientCardBorder,
+                                    RoundedCornerShape(8.dp)
+                                )
+                                .clickable { onTypeSelect(type) }
+                                .padding(vertical = 8.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Text(hazardEmoji(type), fontSize = 16.sp)
+                                Text(
+                                    type.label.take(8),
+                                    fontSize = 10.sp,
+                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                    color = if (isSelected) color else ResilientTextSecondary
+                                )
+                            }
+                        }
+                    }
+                }
 
-        val collapsedPaint = android.graphics.Paint().apply {
-            color = android.graphics.Color.parseColor("#991B1B")
-            textSize = 21f
-            isFakeBoldText = true
-            isAntiAlias = true
-            textAlign = android.graphics.Paint.Align.CENTER
-        }
-
-        for (bld in map.buildings) {
-            // Check if collapsed building hazard near this building
-            val isCollapsed = hazards.any { h ->
-                h.type == HazardType.DEMOLISHED_BUILDING &&
-                        OfflineMapData.calculateDistanceMeters(h.latitude, h.longitude, bld.center.first, bld.center.second) <= 30.0
-            }
-
-            val path = Path()
-            var first = true
-            for ((pLat, pLon) in bld.polygon) {
-                val pt = toScreen(pLat, pLon)
-                if (first) { path.moveTo(pt.x, pt.y); first = false }
-                else path.lineTo(pt.x, pt.y)
-            }
-
-            if (isCollapsed) {
-                // Fill in Red
-                drawPath(path, color = Color(0x35DC2626))
-                drawPath(path, color = Color(0xFFDC2626), style = Stroke(width = 3f * zoomScale))
-                val centerPt = toScreen(bld.center.first, bld.center.second)
-                drawContext.canvas.nativeCanvas.drawText("⚠ COLLAPSED", centerPt.x, centerPt.y - 10f, collapsedPaint)
-                drawContext.canvas.nativeCanvas.drawText(bld.name, centerPt.x, centerPt.y + 12f, collapsedPaint)
-            } else {
-                // Normal building
-                drawPath(path, color = Color(0xFFE5E7EB))
-                drawPath(path, color = Color(0xFF9CA3AF), style = Stroke(width = 1.5f * zoomScale))
-                val centerPt = toScreen(bld.center.first, bld.center.second)
-                drawContext.canvas.nativeCanvas.drawText(bld.name, centerPt.x, centerPt.y + 6f, bldPaint)
-            }
-        }
-
-        // ── Layer 4: A* Safe Navigation Route ────────────────────────
-        if (activeRoute != null && activeRoute.pathCoordinates.size >= 2) {
-            val routePath = Path()
-            var startPt: Offset? = null
-            activeRoute.pathCoordinates.forEachIndexed { idx, (rLat, rLon) ->
-                val pt = toScreen(rLat, rLon)
-                if (idx == 0) {
-                    routePath.moveTo(pt.x, pt.y)
-                    startPt = pt
+                val coordInfo = if (isRouteMode && tracedPoints.size >= 2) {
+                    "Multi-point route hazard (${tracedPoints.size} waypoints)"
                 } else {
-                    routePath.lineTo(pt.x, pt.y)
+                    "Coordinate: %.4f, %.4f".format(coordinate.first, coordinate.second)
                 }
+                Text(coordInfo, fontSize = 11.sp, color = ResilientTextSecondary)
+
+                OutlinedTextField(
+                    value = description,
+                    onValueChange = onDescriptionChange,
+                    label = { Text("Details (e.g., Deep flood on South Road)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = ResilientPrimaryGreen,
+                        unfocusedBorderColor = ResilientCardBorder,
+                        focusedContainerColor = ResilientCardBg,
+                        unfocusedContainerColor = ResilientInputBg
+                    ),
+                    shape = RoundedCornerShape(8.dp)
+                )
             }
-
-            val routeColor = if (activeRoute.isDetour) Color(0xFFF59E0B) else Color(0xFF2563EB)
-
-            // Outer glow
-            drawPath(
-                path = routePath,
-                color = routeColor.copy(alpha = 0.3f),
-                style = Stroke(width = 10f * zoomScale.coerceIn(0.8f, 2.0f), cap = StrokeCap.Round, join = StrokeJoin.Round)
-            )
-            // Core path
-            drawPath(
-                path = routePath,
-                color = routeColor,
-                style = Stroke(width = 5f * zoomScale.coerceIn(0.8f, 2.0f), cap = StrokeCap.Round, join = StrokeJoin.Round)
-            )
-
-            // Destination pin
-            val destCoord = activeRoute.pathCoordinates.last()
-            val destPt = toScreen(destCoord.first, destCoord.second)
-            drawCircle(Color(0xFFDC2626), radius = 10f, center = destPt)
-            drawCircle(Color.White, radius = 4f, center = destPt)
-        }
-
-        // ── Layer 5: Hazards ─────────────────────────────────────────
-        for (hazard in hazards) {
-            val color = hazardColor(hazard.type)
-            if (hazard.isRoute && hazard.points.size >= 2) {
-                val p = Path()
-                var first = true
-                for ((hLat, hLon) in hazard.points) {
-                    val pt = toScreen(hLat, hLon)
-                    if (first) { p.moveTo(pt.x, pt.y); first = false }
-                    else p.lineTo(pt.x, pt.y)
-                }
-                drawPath(p, color = color, style = Stroke(width = 6f, cap = StrokeCap.Round))
-                drawPath(p, color = Color.White, style = Stroke(width = 2f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 6f))))
-            } else {
-                val pt = toScreen(hazard.latitude, hazard.longitude)
-                drawCircle(color.copy(alpha = 0.25f), radius = 16f, center = pt)
-                drawCircle(color, radius = 9f, center = pt)
-                drawCircle(Color.White, radius = 4f, center = pt)
+        },
+        confirmButton = {
+            Button(
+                onClick = onConfirm,
+                colors = ButtonDefaults.buttonColors(containerColor = ResilientErrorRed),
+                shape = RoundedCornerShape(8.dp)
+            ) {
+                Text("📡 Broadcast Hazard", color = Color.White, fontWeight = FontWeight.Bold)
             }
-        }
-
-        // Traced points during manual hazard creation
-        if (isRouteMode && tracedPoints.size >= 2) {
-            val p = Path()
-            var first = true
-            for ((tLat, tLon) in tracedPoints) {
-                val pt = toScreen(tLat, tLon)
-                if (first) { p.moveTo(pt.x, pt.y); first = false }
-                else p.lineTo(pt.x, pt.y)
-            }
-            drawPath(p, color = Color(0xFF2563EB), style = Stroke(width = 3f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f, 6f))))
-        }
-
-        // ── Layer 6: Live Mesh Peers ─────────────────────────────────
-        val peerTextPaint = android.graphics.Paint().apply {
-            color = android.graphics.Color.WHITE
-            textSize = 18f
-            isFakeBoldText = true
-            isAntiAlias = true
-            textAlign = android.graphics.Paint.Align.CENTER
-        }
-
-        for (peer in peers) {
-            val pt = toScreen(peer.latitude, peer.longitude)
-            val peerColor = if (peer.role == "ADMIN") Color(0xFF2563EB) else Color(0xFF10B981)
-
-            // Outer ring
-            drawCircle(peerColor.copy(alpha = 0.3f), radius = 18f, center = pt)
-            drawCircle(peerColor, radius = 10f, center = pt)
-            drawCircle(Color.White, radius = 4f, center = pt)
-
-            // Label
-            val label = peer.displayName.take(10)
-            drawContext.canvas.nativeCanvas.drawText(label, pt.x, pt.y - 14f, peerTextPaint)
-        }
-
-        // ── Layer 7: Self Position Marker & Compass Cone ─────────────
-        val selfPt = Offset(cx, cy)
-
-        // Direction cone (representing viewing direction from azimuth)
-        val coneAngle = 55.0 // degrees spread
-        val coneLen = 45f * zoomScale.coerceIn(0.8f, 2.0f)
-        val headingRad = Math.toRadians((if (orientationMode == MapOrientationMode.HEADING_UP) 0f else azimuth).toDouble())
-
-        val leftAngle = headingRad - Math.toRadians(coneAngle / 2.0)
-        val rightAngle = headingRad + Math.toRadians(coneAngle / 2.0)
-
-        val conePath = Path().apply {
-            moveTo(selfPt.x, selfPt.y)
-            lineTo(
-                selfPt.x + (coneLen * sin(leftAngle)).toFloat(),
-                selfPt.y - (coneLen * cos(leftAngle)).toFloat()
-            )
-            lineTo(
-                selfPt.x + (coneLen * sin(rightAngle)).toFloat(),
-                selfPt.y - (coneLen * cos(rightAngle)).toFloat()
-            )
-            close()
-        }
-        drawPath(conePath, color = Color(0x3521865B))
-
-        // Center Pulsing Marker
-        drawCircle(Color(0x3021865B), radius = 18f, center = selfPt)
-        drawCircle(Color(0xFF21865B), radius = 8f, center = selfPt)
-        drawCircle(Color.White, radius = 3.5f, center = selfPt)
-    }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel", color = ResilientTextSecondary) }
+        },
+        containerColor = ResilientCardBg,
+        shape = RoundedCornerShape(14.dp)
+    )
 }
-
-// ── Color & Emoji Helpers ────────────────────────────────────────────
-
-private fun hazardColor(type: HazardType): Color = when (type) {
-    HazardType.DEMOLISHED_BUILDING -> ResilientErrorRed
-    HazardType.FLOODED_ROAD -> ResilientInfoBlue
-    HazardType.OBSTRUCTED_PATH -> ResilientWarningAmber
-}
-
-private fun hazardTypeEmoji(type: HazardType): String = when (type) {
-    HazardType.DEMOLISHED_BUILDING -> "🏚"
-    HazardType.FLOODED_ROAD -> "🌊"
-    HazardType.OBSTRUCTED_PATH -> "🚧"
-}
-
-// ── Hazard Feed Card ─────────────────────────────────────────────────
 
 @Composable
 private fun HazardFeedCard(
     hazard: HazardMarker,
     distanceMeters: Double,
-    onAlignRadar: (() -> Unit)? = null,
-    onRouteToHazard: (() -> Unit)? = null
+    onRouteToHazard: () -> Unit,
+    onCenterOnHazard: () -> Unit
 ) {
-    val dateFormat = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
-
+    val typeColor = hazardColor(hazard.type)
     Card(
         modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = ResilientCardBg),
-        shape = RoundedCornerShape(10.dp),
-        border = androidx.compose.foundation.BorderStroke(1.dp, ResilientCardBorder),
-        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+        colors = CardDefaults.cardColors(containerColor = typeColor.copy(alpha = 0.05f)),
+        shape = RoundedCornerShape(8.dp),
+        border = androidx.compose.foundation.BorderStroke(1.dp, typeColor.copy(alpha = 0.25f))
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(10.dp),
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-            verticalAlignment = Alignment.CenterVertically
+                .padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             Box(
                 modifier = Modifier
-                    .size(38.dp)
-                    .background(hazardColor(hazard.type).copy(alpha = 0.12f), CircleShape),
+                    .size(34.dp)
+                    .background(typeColor.copy(alpha = 0.15f), CircleShape),
                 contentAlignment = Alignment.Center
             ) {
-                Text(text = hazardTypeEmoji(hazard.type), fontSize = 17.sp)
+                Text(hazardEmoji(hazard.type), fontSize = 16.sp)
             }
-
             Column(modifier = Modifier.weight(1f)) {
+                Text(hazard.type.label, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = ResilientTextMain)
+                val desc = hazard.description.ifBlank { "Active obstacle" }
+                Text(desc, fontSize = 11.sp, color = ResilientTextSecondary, maxLines = 1)
+                val distText = if (distanceMeters < 1000) "${distanceMeters.roundToInt()}m away"
+                else "${"%.1f".format(distanceMeters / 1000)}km away"
                 Text(
-                    text = hazard.type.label,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = ResilientTextMain
+                    "Node ${hazard.senderId} • $distText",
+                    fontSize = 10.sp,
+                    color = ResilientTextSecondary
                 )
-                Text(
-                    text = hazard.description,
-                    fontSize = 11.sp,
-                    color = ResilientTextSecondary,
-                    maxLines = 1
-                )
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "From: ${hazard.senderId}",
-                        fontSize = 10.sp,
-                        fontFamily = FontFamily.Monospace,
-                        color = ResilientTextSecondary
-                    )
-                    Text(
-                        text = dateFormat.format(Date(hazard.timestamp)),
-                        fontSize = 10.sp,
-                        color = ResilientTextSecondary
-                    )
-                }
             }
-
-            Column(
-                horizontalAlignment = Alignment.End,
-                verticalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                val distText = if (distanceMeters < 1000) {
-                    "${distanceMeters.toInt()}m"
-                } else {
-                    "${"%.1f".format(distanceMeters / 1000.0)}km"
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                TextButton(
+                    onClick = onRouteToHazard,
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+                ) {
+                    Text("Avoid", fontSize = 11.sp, color = ResilientPrimaryGreen, fontWeight = FontWeight.Bold)
                 }
-                Text(
-                    text = distText,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = if (distanceMeters < 200) ResilientErrorRed else ResilientTextMain
-                )
-
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    if (onRouteToHazard != null) {
-                        OutlinedButton(
-                            onClick = onRouteToHazard,
-                            colors = ButtonDefaults.outlinedButtonColors(contentColor = ResilientInfoBlue),
-                            border = androidx.compose.foundation.BorderStroke(1.dp, ResilientInfoBlue.copy(alpha = 0.5f)),
-                            shape = RoundedCornerShape(4.dp),
-                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
-                            modifier = Modifier.height(24.dp)
-                        ) {
-                            Text("🧭 Route", fontSize = 9.sp, fontWeight = FontWeight.Bold)
-                        }
-                    }
-                    if (onAlignRadar != null) {
-                        OutlinedButton(
-                            onClick = onAlignRadar,
-                            colors = ButtonDefaults.outlinedButtonColors(contentColor = ResilientPrimaryGreen),
-                            border = androidx.compose.foundation.BorderStroke(1.dp, ResilientPrimaryGreen.copy(alpha = 0.5f)),
-                            shape = RoundedCornerShape(4.dp),
-                            contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
-                            modifier = Modifier.height(24.dp)
-                        ) {
-                            Text("🎯 Align", fontSize = 9.sp, fontWeight = FontWeight.Bold)
-                        }
-                    }
+                TextButton(
+                    onClick = onCenterOnHazard,
+                    contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp)
+                ) {
+                    Text("🎯", fontSize = 13.sp)
                 }
             }
         }
     }
+}
+
+private fun hazardEmoji(type: HazardType): String = when (type) {
+    HazardType.DEMOLISHED_BUILDING -> "🏚"
+    HazardType.FLOODED_ROAD -> "🌊"
+    HazardType.OBSTRUCTED_PATH -> "🚧"
+}
+
+private fun hazardColor(type: HazardType): Color = when (type) {
+    HazardType.DEMOLISHED_BUILDING -> ResilientErrorRed
+    HazardType.FLOODED_ROAD -> ResilientInfoBlue
+    HazardType.OBSTRUCTED_PATH -> ResilientWarningAmber
 }

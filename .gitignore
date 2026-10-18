@@ -41,6 +41,7 @@ local.properties
 # Google Services
 google-services.json
 
-# OS files
+# OS and editor files
 .DS_Store
 Thumbs.db
+.vscode/

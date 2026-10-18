@@ -171,26 +171,32 @@ fun DashboardScreen(
                 }
 
                 Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text(
+                            text = "Node ID:",
+                            fontSize = 13.sp,
+                            color = ResilientTextSecondary
+                        )
+                        Text(
+                            text = viewModel.myNodeId,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace,
+                            color = ResilientTextMain
+                        )
+                    }
                     Text(
-                        text = "Node ID:",
-                        fontSize = 13.sp,
-                        color = ResilientTextSecondary
-                    )
-                    Text(
-                        text = viewModel.myNodeId,
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.Bold,
-                        fontFamily = FontFamily.Monospace,
-                        color = ResilientTextMain
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = if (isRunning) "Port: ${diagnostics.listeningPort}" else "Port: 9876 (Standby)",
+                        text = if (isRunning) "Port: ${diagnostics.listeningPort}" else "Port: 9876",
                         fontSize = 12.sp,
-                        color = ResilientTextSecondary
+                        fontWeight = FontWeight.SemiBold,
+                        color = if (isRunning) ResilientPrimaryGreen else ResilientTextSecondary
                     )
                 }
 
